@@ -1,20 +1,32 @@
 'use client';
-import React, { useEffect, useMemo, useRef, useState } from "react";
-// Local-only lottery presenter with a dramatic five-card (two digits each) reveal.
-// New features:
-// - **Setup screen before the show** asking for CSV of participants + CSV of prizes
-//   (or load samples) before entering the draw screen.
-// - **Icon-only controls**. Draw uses a golden FLASH button (⚡️).
-// - **Auto-finish** when only one candidate remains under the current prefix.
-// - **Participants-left pane scrolls independently**; the rest of the page is fixed.
-// - Settings remain in a slide-over panel.
-//
-// Keyboard: Space = Draw (Flash), N = Next prize, U = Undo last prize, R = Reset round.
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+
+// ------------------------------
+// Types
+// ------------------------------
+export type Tier = 'T1' | 'T2' | 'T3';
+export interface Participant {
+  id: number;
+  name: string;
+  phoneOriginal: string;
+  phoneNorm: string; // 10 digits e.g. 09xxxxxxxx
+  phoneLast3: string; // last 3
+  tier: Tier;
+}
+export interface Prize {
+  id: string;
+  label: string;
+  subtitle: string;
+  group: string;
+  eligible: Tier[];
+}
+interface TestResult { name: string; ok: boolean; err?: string }
+interface ConfettiPiece { id: number; left: number; duration: number; delay: number; size: number; rotate: number }
 
 // ------------------------------
 // Helpers
 // ------------------------------
-function hashStringToInt32(str) {
+function hashStringToInt32(str: string): number {
   let h = 2166136261 >>> 0; // FNV-1a basis
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i);
@@ -23,18 +35,18 @@ function hashStringToInt32(str) {
   return h >>> 0;
 }
 
-function mulberry32(seed) {
+function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return function () {
     a |= 0;
-    a = (a + 0x6D2B79F5) | 0;
+    a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296; // [0,1)
   };
 }
 
-function rngIntUnbiased(rng, n) {
+function rngIntUnbiased(rng: () => number, n: number): number {
   if (n <= 0) return 0;
   const max = 0xffffffff;
   const limit = max - ((max + 1) % n);
@@ -44,100 +56,136 @@ function rngIntUnbiased(rng, n) {
   }
 }
 
-function normalizePhone(raw) {
-  if (!raw) return null;
-  let digits = ("" + raw).replace(/\D+/g, "");
-  if (digits.startsWith("251") && digits.length >= 12) {
+function normalizePhone(raw: string | number | null | undefined): string | null {
+  if (!raw && raw !== 0) return null;
+  let digits = ('' + raw).replace(/\D+/g, '');
+  if (digits.startsWith('251') && digits.length >= 12) {
     const last9 = digits.slice(-9);
-    digits = "0" + last9;
+    digits = '0' + last9;
   }
   if (digits.length > 10) digits = digits.slice(-10);
   if (digits.length !== 10) return null;
   return digits;
 }
 
-function maskPhoneLast3(phone) {
+function maskPhoneLast3(phone: string): string {
   const last3 = phone.slice(-3);
   return `•••••${last3}`;
 }
 
-function phoneToPairs10(phone10) {
+function phoneToPairs10(phone10: string): string[] {
   return [0, 2, 4, 6, 8].map((i) => phone10.slice(i, i + 2));
 }
 
-function classNames(...xs) {
-  return xs.filter(Boolean).join(" ");
+function classNames(...xs: Array<string | false | null | undefined>): string {
+  return xs.filter(Boolean).join(' ');
 }
 
 // Sandbox-safe URL replace (no-ops in about:srcdoc/blob)
-function canReplaceHistory() {
+function canReplaceHistory(): boolean {
   try {
     const u = new URL(window.location.href);
-    return (u.protocol === "http:" || u.protocol === "https:") && !!window.history?.replaceState;
+    return (u.protocol === 'http:' || u.protocol === 'https:') && !!window.history?.replaceState;
   } catch {
     return false;
   }
 }
-function safeReplaceQueryParam(key, value) {
+function safeReplaceQueryParam(key: string, value: string | null): void {
   if (!canReplaceHistory()) return;
   try {
     const url = new URL(window.location.href);
     if (value === null) url.searchParams.delete(key);
     else url.searchParams.set(key, value);
-    window.history.replaceState(null, "", url.toString());
+    window.history.replaceState(null, '', url.toString());
   } catch {}
 }
 
 // ------------------------------
 // Sample data & prizes
 // ------------------------------
-function generateSampleParticipants(count = 5000) {
-  const out = [];
+function generateSampleParticipants(count = 5000): Participant[] {
+  const out: Participant[] = [];
   for (let i = 0; i < count; i++) {
     const id = i + 1;
-    const rest = Math.floor(Math.random() * 1_00_00_00_00).toString().padStart(8, "0");
-    const phone = "09" + rest;
-    let tier = "T3";
-    if (i < Math.floor(count * 0.24)) tier = "T1"; // ~1200
-    else if (i < Math.floor(count * 0.66)) tier = "T2"; // ~2100
-    out.push({ id, name: `Participant ${id.toString().padStart(4, "0")}`, phoneOriginal: phone, phoneNorm: phone, phoneLast3: phone.slice(-3), tier });
+    const rest = Math.floor(Math.random() * 1_00_00_00_00)
+      .toString()
+      .padStart(8, '0');
+    const phone = '09' + rest;
+    let tier: Tier = 'T3';
+    if (i < Math.floor(count * 0.24)) tier = 'T1'; // ~1200
+    else if (i < Math.floor(count * 0.66)) tier = 'T2'; // ~2100
+    out.push({ id, name: `Participant ${id.toString().padStart(4, '0')}`, phoneOriginal: phone, phoneNorm: phone, phoneLast3: phone.slice(-3), tier });
   }
   return out;
 }
 
-function buildDefaultPrizes() {
-  const prizes = [];
-  for (let i = 0; i < 10; i++) prizes.push({ id: `G-${i + 1}`, label: `Grand Prize ${i + 1}`, subtitle: "", group: "Grand", eligible: ["T1"] });
-  for (let i = 0; i < 40; i++) prizes.push({ id: `M-${i + 1}`, label: `Major Prize ${i + 1}`, subtitle: "Smart Watch Series X", group: "Major", eligible: ["T1", "T2"] });
-  for (let i = 0; i < 50; i++) prizes.push({ id: `GN-${i + 1}`, label: `General Prize ${i + 1}`, subtitle: "", group: "General", eligible: ["T1", "T2", "T3"] });
+function buildDefaultPrizes(): Prize[] {
+  const prizes: Prize[] = [];
+  for (let i = 0; i < 10; i++) prizes.push({ id: `G-${i + 1}`, label: `Grand Prize ${i + 1}`, subtitle: '', group: 'Grand', eligible: ['T1'] });
+  for (let i = 0; i < 40; i++) prizes.push({ id: `M-${i + 1}`, label: `Major Prize ${i + 1}`, subtitle: 'Smart Watch Series X', group: 'Major', eligible: ['T1', 'T2'] });
+  for (let i = 0; i < 50; i++) prizes.push({ id: `GN-${i + 1}`, label: `General Prize ${i + 1}`, subtitle: '', group: 'General', eligible: ['T1', 'T2', 'T3'] });
   return prizes;
 }
 
 // ------------------------------
 // Self-tests (open with ?test=1)
 // ------------------------------
-function runSelfTests() {
-  const results = [];
-  const t = (name, fn) => { try { fn(); results.push({ name, ok: true }); } catch (e) { results.push({ name, ok: false, err: String(e) }); } };
-  t("normalize local 10-digit", () => { const v = normalizePhone("0912345678"); if (v !== "0912345678") throw new Error("bad normalize"); });
-  t("normalize +251 prefix", () => { const v = normalizePhone("+251912345678"); if (v !== "0912345678") throw new Error("bad +251 normalize: " + v); });
-  t("normalize 251 no plus", () => { const v = normalizePhone("251912345678"); if (v !== "0912345678") throw new Error("bad 251 normalize: " + v); });
-  t("reject short", () => { const v = normalizePhone("09123"); if (v !== null) throw new Error("expected null"); });
-  t("pairs split", () => { const ps = phoneToPairs10("0912345678"); const expect = ["09","12","34","56","78"]; if (JSON.stringify(ps) !== JSON.stringify(expect)) throw new Error("bad pairs"); });
-  t("mulberry32 deterministic", () => { const r1 = mulberry32(42), r2 = mulberry32(42); for (let i=0;i<10;i++) if (r1()!==r2()) throw new Error("nondeterministic"); });
-  t("hash stability", () => { const a=hashStringToInt32("abc"), b=hashStringToInt32("abc"); if (a!==b) throw new Error("hash changed"); });
+function runSelfTests(): TestResult[] {
+  const results: TestResult[] = [];
+  const t = (name: string, fn: () => void) => {
+    try {
+      fn();
+      results.push({ name, ok: true });
+    } catch (e) {
+      results.push({ name, ok: false, err: String(e) });
+    }
+  };
+  t('normalize local 10-digit', () => {
+    const v = normalizePhone('0912345678');
+    if (v !== '0912345678') throw new Error('bad normalize');
+  });
+  t('normalize +251 prefix', () => {
+    const v = normalizePhone('+251912345678');
+    if (v !== '0912345678') throw new Error('bad +251 normalize: ' + v);
+  });
+  t('normalize 251 no plus', () => {
+    const v = normalizePhone('251912345678');
+    if (v !== '0912345678') throw new Error('bad 251 normalize: ' + v);
+  });
+  t('reject short', () => {
+    const v = normalizePhone('09123');
+    if (v !== null) throw new Error('expected null');
+  });
+  t('pairs split', () => {
+    const ps = phoneToPairs10('0912345678');
+    const expect = ['09', '12', '34', '56', '78'];
+    if (JSON.stringify(ps) !== JSON.stringify(expect)) throw new Error('bad pairs');
+  });
+  t('mulberry32 deterministic', () => {
+    const r1 = mulberry32(42),
+      r2 = mulberry32(42);
+    for (let i = 0; i < 10; i++) if (r1() !== r2()) throw new Error('nondeterministic');
+  });
+  t('hash stability', () => {
+    const a = hashStringToInt32('abc'),
+      b = hashStringToInt32('abc');
+    if (a !== b) throw new Error('hash changed');
+  });
   return results;
 }
 
 // ------------------------------
 // Confetti (simple CSS/DOM confetti without external libs)
 // ------------------------------
-function Confetti({ show }) {
-  const [pieces, setPieces] = useState([]);
+function Confetti({ show }: { show: boolean }) {
+  const [pieces, setPieces] = useState<ConfettiPiece[]>([]);
   useEffect(() => {
-    if (!show) { setPieces([]); return; }
+    if (!show) {
+      setPieces([]);
+      return;
+    }
     const N = 120; // number of pieces
-    const p = new Array(N).fill(0).map((_, i) => ({
+    const p: ConfettiPiece[] = new Array(N).fill(0).map((_, i) => ({
       id: i,
       left: Math.random() * 100,
       duration: 2000 + Math.random() * 2500,
@@ -156,12 +204,12 @@ function Confetti({ show }) {
         <div
           key={c.id}
           style={{
-            position: "absolute",
+            position: 'absolute',
             left: `${c.left}%`,
             top: `-10%`,
             width: `${c.size}px`,
             height: `${c.size * 0.6}px`,
-            background: ["#D97706", "#2563EB", "#0D9488", "#F5F5F3"][c.id % 4],
+            background: ['#D97706', '#2563EB', '#0D9488', '#F5F5F3'][c.id % 4],
             transform: `rotate(${c.rotate}deg)`,
             animation: `fall ${c.duration}ms ease-in ${c.delay}ms forwards` as any,
             borderRadius: 2,
@@ -177,23 +225,24 @@ function Confetti({ show }) {
 // ------------------------------
 // CSV parsers
 // ------------------------------
-function parseParticipantsCSV(text) {
+function parseParticipantsCSV(text: string): Participant[] {
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (lines.length === 0) return [];
-  const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
-  const idxName = header.indexOf("name");
-  const idxPhone = header.indexOf("phone");
-  const idxTier = header.indexOf("tier");
+  const header = lines[0].split(',').map((h) => h.trim().toLowerCase());
+  const idxName = header.indexOf('name');
+  const idxPhone = header.indexOf('phone');
+  const idxTier = header.indexOf('tier');
   if (idxName === -1 || idxPhone === -1 || idxTier === -1) return [];
-  const out = [];
+  const out: Participant[] = [];
   for (let i = 1; i < lines.length; i++) {
-    const row = lines[i].split(","); if (row.length < 3) continue;
+    const row = lines[i].split(',');
+    if (row.length < 3) continue;
     const name = row[idxName]?.trim();
     const phoneRaw = row[idxPhone]?.trim();
     const tierRaw = row[idxTier]?.trim().toUpperCase();
     const phoneNorm = normalizePhone(phoneRaw);
     if (!name || !phoneNorm) continue;
-    const tier = ["T1","T2","T3"].includes(tierRaw) ? tierRaw : "T3";
+    const tier = (['T1', 'T2', 'T3'] as const).includes(tierRaw as Tier) ? (tierRaw as Tier) : 'T3';
     out.push({ id: out.length + 1, name, phoneOriginal: phoneRaw, phoneNorm, phoneLast3: phoneNorm.slice(-3), tier });
   }
   return out;
@@ -201,35 +250,30 @@ function parseParticipantsCSV(text) {
 
 // Expected headers for prizes CSV:
 // label,eligible,group,subtitle,id
-// - label (string) REQUIRED
-// - eligible (e.g. "T1,T2" or "T1|T2|T3"). Default T1,T2,T3 if missing/invalid.
-// - group (e.g. Grand/Major/General) optional
-// - subtitle (string) optional (e.g. model name)
-// - id (string) optional; otherwise auto P-<row>
-function parsePrizesCSV(text) {
+function parsePrizesCSV(text: string): Prize[] {
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (lines.length === 0) return [];
-  const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
-  const idxLabel = header.indexOf("label");
-  const idxElig = header.indexOf("eligible");
-  const idxGroup = header.indexOf("group");
-  const idxSub = header.indexOf("subtitle");
-  const idxId = header.indexOf("id");
+  const header = lines[0].split(',').map((h) => h.trim().toLowerCase());
+  const idxLabel = header.indexOf('label');
+  const idxElig = header.indexOf('eligible');
+  const idxGroup = header.indexOf('group');
+  const idxSub = header.indexOf('subtitle');
+  const idxId = header.indexOf('id');
   if (idxLabel === -1) return [];
-  const out = [];
+  const out: Prize[] = [];
   for (let i = 1; i < lines.length; i++) {
-    const row = lines[i].split(",");
+    const row = lines[i].split(',');
     const rawLabel = row[idxLabel]?.trim();
     if (!rawLabel) continue;
-    const rawElig = (idxElig !== -1 ? row[idxElig] : "")?.trim() || "T1,T2,T3";
+    const rawElig = (idxElig !== -1 ? row[idxElig] : '')?.trim() || 'T1,T2,T3';
     const elig = rawElig
       .split(/[|,\s]+/)
       .map((x) => x.toUpperCase())
-      .filter((x) => ["T1","T2","T3"].includes(x));
-    const group = (idxGroup !== -1 ? row[idxGroup] : "")?.trim() || "General";
-    const subtitle = (idxSub !== -1 ? row[idxSub] : "")?.trim() || "";
-    const id = ((idxId !== -1 ? row[idxId] : "")?.trim()) || `P-${i}`;
-    out.push({ id, label: rawLabel, subtitle, group, eligible: elig.length ? elig : ["T1","T2","T3"] });
+      .filter((x): x is Tier => ['T1', 'T2', 'T3'].includes(x));
+    const group = (idxGroup !== -1 ? row[idxGroup] : '')?.trim() || 'General';
+    const subtitle = (idxSub !== -1 ? row[idxSub] : '')?.trim() || '';
+    const id = (idxId !== -1 ? row[idxId] : '')?.trim() || `P-${i}`;
+    out.push({ id, label: rawLabel, subtitle, group, eligible: elig.length ? elig : ['T1', 'T2', 'T3'] });
   }
   return out;
 }
@@ -239,51 +283,61 @@ function parsePrizesCSV(text) {
 // ------------------------------
 export default function App() {
   // Setup gate (must provide participants + prizes before show)
-  const [setupOpen, setSetupOpen] = useState(true);
+  const [setupOpen, setSetupOpen] = useState<boolean>(true);
 
   // SETTINGS (slide-over)
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [eventTitle, setEventTitle] = useState("New Year Draw 2025");
-  const [seedText, setSeedText] = useState(() => localStorage.getItem("lottery_seed") || `seed-${Math.random().toString(36).slice(2, 10)}`);
-  const [maskWinnerPhone, setMaskWinnerPhone] = useState(true); // default masked
-  useEffect(() => { localStorage.setItem("lottery_seed", seedText); }, [seedText]);
+  const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  const [eventTitle, setEventTitle] = useState<string>('New Year Draw 2025');
+  const [seedText, setSeedText] = useState<string>(() => localStorage.getItem('lottery_seed') || `seed-${Math.random().toString(36).slice(2, 10)}`);
+  const [maskWinnerPhone, setMaskWinnerPhone] = useState<boolean>(true); // default masked
+  useEffect(() => {
+    localStorage.setItem('lottery_seed', seedText);
+  }, [seedText]);
 
   // Clock for top-right
-  const [now, setNow] = useState(new Date());
-  useEffect(() => { const id = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(id); }, []);
+  const [now, setNow] = useState<Date>(new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
   const timeStr = useMemo(() => now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), [now]);
 
   // Data
-  const [participants, setParticipants] = useState([]); // start empty
-  const [frozen, setFrozen] = useState(false);
-  const dedupedParticipants = useMemo(() => {
-    const seen = new Set(); const out = [];
-    for (const p of participants) { if (!p.phoneNorm || seen.has(p.phoneNorm)) continue; seen.add(p.phoneNorm); out.push(p); }
+  const [participants, setParticipants] = useState<Participant[]>([]); // start empty
+  const [frozen, setFrozen] = useState<boolean>(false);
+  const dedupedParticipants = useMemo<Participant[]>(() => {
+    const seen = new Set<string>();
+    const out: Participant[] = [];
+    for (const p of participants) {
+      if (!p.phoneNorm || seen.has(p.phoneNorm)) continue;
+      seen.add(p.phoneNorm);
+      out.push(p);
+    }
     return out;
   }, [participants]);
 
   // Prizes and winners
-  const [prizes, setPrizes] = useState([]);
-  const [currentPrizeIndex, setCurrentPrizeIndex] = useState(0);
-  const [winnersByPrizeId, setWinnersByPrizeId] = useState({}); // { [prizeId]: participantId }
-  const winnersSet = useMemo(() => new Set(Object.values(winnersByPrizeId)), [winnersByPrizeId]);
-  const currentPrize = prizes[currentPrizeIndex];
+  const [prizes, setPrizes] = useState<Prize[]>([]);
+  const [currentPrizeIndex, setCurrentPrizeIndex] = useState<number>(0);
+  const [winnersByPrizeId, setWinnersByPrizeId] = useState<Record<string, number>>({}); // { [prizeId]: participantId }
+  const winnersSet = useMemo(() => new Set<number>(Object.values(winnersByPrizeId)), [winnersByPrizeId]);
+  const currentPrize: Prize | undefined = prizes[currentPrizeIndex];
 
-  const eligibleForCurrent = useMemo(() => {
+  const eligibleForCurrent = useMemo<Participant[]>(() => {
     if (!currentPrize) return [];
     return dedupedParticipants.filter((p) => currentPrize.eligible.includes(p.tier) && !winnersSet.has(p.id));
   }, [currentPrize, dedupedParticipants, winnersSet]);
 
   // Reveal state (sequential flash pulls)
-  const [revealedPairs, setRevealedPairs] = useState(["--","--","--","--","--"]);
-  const [revealStep, setRevealStep] = useState(0); // 0..5
-  const [spinning, setSpinning] = useState(false);
-  const [spinValue, setSpinValue] = useState("--");
-  const spinIntervalRef = useRef(null);
-  const [showConfetti, setShowConfetti] = useState(false);
+  const [revealedPairs, setRevealedPairs] = useState<string[]>(['--', '--', '--', '--', '--']);
+  const [revealStep, setRevealStep] = useState<number>(0); // 0..5
+  const [spinning, setSpinning] = useState<boolean>(false);
+  const [spinValue, setSpinValue] = useState<string>('--');
+  const spinIntervalRef = useRef<number | null>(null);
+  const [showConfetti, setShowConfetti] = useState<boolean>(false);
 
   // Derived: remaining pool under current prefix
-  const remainingList = useMemo(() => {
+  const remainingList = useMemo<Participant[]>(() => {
     let pool = eligibleForCurrent;
     if (revealStep > 0) {
       pool = pool.filter((p) => {
@@ -313,17 +367,17 @@ export default function App() {
   }, [remainingList, revealStep, spinning, currentPrize, winnersByPrizeId]);
 
   // Master PRF for reproducibility per prize+step
-  const prfForStep = (step, extra = "") => {
-    const base = `${seedText}|${currentPrize?.id || "NOPRIZE"}|step:${step}|prefix:${revealedPairs.join("")}|${extra}`;
+  const prfForStep = (step: number, extra = ''): (() => number) => {
+    const base = `${seedText}|${currentPrize?.id || 'NOPRIZE'}|step:${step}|prefix:${revealedPairs.join('')}|${extra}`;
     const seed = hashStringToInt32(base);
     return mulberry32(seed);
   };
 
   // Weighted pick next pair ~ proportional to counts among remaining participants
-  function pickNextPairWeighted() {
+  function pickNextPairWeighted(): string | null {
     if (!currentPrize) return null;
     if (revealStep >= 5) return null;
-    const counts = {};
+    const counts: Record<string, number> = {};
     for (const p of remainingList) {
       const pair = phoneToPairs10(p.phoneNorm)[revealStep];
       counts[pair] = (counts[pair] || 0) + 1;
@@ -333,37 +387,41 @@ export default function App() {
     const total = entries.reduce((s, [, c]) => s + c, 0);
     const rng = prfForStep(revealStep + 1);
     let r = rng() * total;
-    for (const [pair, c] of entries) { if ((r -= c) <= 0) return pair; }
+    for (const [pair, c] of entries) {
+      if ((r -= c) <= 0) return pair;
+    }
     return entries[entries.length - 1][0];
   }
 
-  function resetRound() {
+  function resetRound(): void {
     stopSpin();
-    setRevealedPairs(["--","--","--","--","--"]);
+    setRevealedPairs(['--', '--', '--', '--', '--']);
     setRevealStep(0);
     setSpinning(false);
-    setSpinValue("--");
+    setSpinValue('--');
     setShowConfetti(false);
   }
 
-  function nextPrize() {
+  function nextPrize(): void {
     resetRound();
     setCurrentPrizeIndex((i) => Math.min(i + 1, prizes.length - 1));
   }
 
-  function undoLastPrize() {
+  function undoLastPrize(): void {
     let idx = currentPrizeIndex;
     const pid = prizes[idx]?.id;
     if (!winnersByPrizeId[pid] && idx > 0) idx = idx - 1;
     const pid2 = prizes[idx]?.id;
     if (!pid2) return;
-    const copy = { ...winnersByPrizeId }; delete copy[pid2]; setWinnersByPrizeId(copy);
+    const copy = { ...winnersByPrizeId } as Record<string, number>;
+    delete copy[pid2];
+    setWinnersByPrizeId(copy);
     setCurrentPrizeIndex(idx);
     resetRound();
   }
 
   // DRAW (Flash) implementation
-  function drawFlash() {
+  function drawFlash(): void {
     if (!currentPrize) return;
     if (winnersByPrizeId[currentPrize.id]) return; // already assigned
     if (spinning) return;
@@ -372,23 +430,26 @@ export default function App() {
     if (remainingList.length === 1) return;
 
     // Start spin animation cycling 00..99 while we compute final selection
-    const rngAnim = prfForStep(revealStep + 1, "anim");
+    const rngAnim = prfForStep(revealStep + 1, 'anim');
     setSpinning(true);
     stopSpin();
-    spinIntervalRef.current = setInterval(() => {
-      const v = Math.floor(rngAnim() * 100).toString().padStart(2, "0");
+    spinIntervalRef.current = window.setInterval(() => {
+      const v = Math.floor(rngAnim() * 100)
+        .toString()
+        .padStart(2, '0');
       setSpinValue(v);
     }, 50);
 
     // After duration, lock to chosen pair and advance
     const chosen = pickNextPairWeighted();
     if (!chosen) {
-      stopSpin(); setSpinning(false);
-      alert("No candidates match the current prefix. Check your list and prize eligibility.");
+      stopSpin();
+      setSpinning(false);
+      alert('No candidates match the current prefix. Check your list and prize eligibility.');
       return;
     }
 
-    setTimeout(() => {
+    window.setTimeout(() => {
       stopSpin();
       const next = revealedPairs.slice();
       next[revealStep] = chosen;
@@ -400,60 +461,84 @@ export default function App() {
       if (ns >= 5) {
         const finalPool = remainingList.filter((p) => {
           const ps = phoneToPairs10(p.phoneNorm);
-          for (let i = 0; i < 5; i++) if (ps[i] !== next[i]) return false; return true;
+          for (let i = 0; i < 5; i++) if (ps[i] !== next[i]) return false;
+          return true;
         });
-        let winner = finalPool[0] || remainingList[0];
-        if (!winner) { alert("No participant matched the final digits — please verify inputs."); return; }
+        const winner = finalPool[0] || remainingList[0];
+        if (!winner) {
+          alert('No participant matched the final digits — please verify inputs.');
+          return;
+        }
         setWinnersByPrizeId((prev) => ({ ...prev, [currentPrize.id]: winner.id }));
         setShowConfetti(true);
-        setTimeout(() => setShowConfetti(false), 3500);
+        window.setTimeout(() => setShowConfetti(false), 3500);
       }
     }, 1200); // ~1.2s dramatic spin
   }
 
-  function stopSpin() {
-    if (spinIntervalRef.current) { clearInterval(spinIntervalRef.current); spinIntervalRef.current = null; }
+  function stopSpin(): void {
+    if (spinIntervalRef.current) {
+      window.clearInterval(spinIntervalRef.current);
+      spinIntervalRef.current = null;
+    }
   }
 
   // CSV loaders
-  function handleParticipantsCSVFile(e) {
-    const f = e.target.files?.[0]; if (!f) return;
+  function handleParticipantsCSVFile(e: React.ChangeEvent<HTMLInputElement>): void {
+    const f = e.target.files?.[0];
+    if (!f) return;
     const reader = new FileReader();
     reader.onload = () => {
-      const text = reader.result?.toString() || "";
+      const text = (reader.result as string) || '';
       const parsed = parseParticipantsCSV(text);
-      if (parsed.length === 0) { alert("Participants CSV empty/invalid. Headers: name,phone,tier"); return; }
-      setParticipants(parsed); setFrozen(false); setCurrentPrizeIndex(0); setWinnersByPrizeId({}); resetRound();
+      if (parsed.length === 0) {
+        alert('Participants CSV empty/invalid. Headers: name,phone,tier');
+        return;
+      }
+      setParticipants(parsed);
+      setFrozen(false);
+      setCurrentPrizeIndex(0);
+      setWinnersByPrizeId({});
+      resetRound();
     };
     reader.readAsText(f);
   }
-  function handlePrizesCSVFile(e) {
-    const f = e.target.files?.[0]; if (!f) return;
+  function handlePrizesCSVFile(e: React.ChangeEvent<HTMLInputElement>): void {
+    const f = e.target.files?.[0];
+    if (!f) return;
     const reader = new FileReader();
     reader.onload = () => {
-      const text = reader.result?.toString() || "";
+      const text = (reader.result as string) || '';
       const parsed = parsePrizesCSV(text);
-      if (parsed.length === 0) { alert("Prizes CSV empty/invalid. Headers: label,eligible,group,subtitle,id"); return; }
-      setPrizes(parsed); setCurrentPrizeIndex(0); setWinnersByPrizeId({}); resetRound();
+      if (parsed.length === 0) {
+        alert('Prizes CSV empty/invalid. Headers: label,eligible,group,subtitle,id');
+        return;
+      }
+      setPrizes(parsed);
+      setCurrentPrizeIndex(0);
+      setWinnersByPrizeId({});
+      resetRound();
     };
     reader.readAsText(f);
   }
 
   // Keyboard shortcuts
   useEffect(() => {
-    function onKey(e) {
+    function onKey(e: KeyboardEvent) {
       if (setupOpen) return; // ignore while in setup
-      if (e.key === " ") { e.preventDefault(); drawFlash(); }
-      else if (e.key.toLowerCase() === "n") nextPrize();
-      else if (e.key.toLowerCase() === "u") undoLastPrize();
-      else if (e.key.toLowerCase() === "r") resetRound();
+      if (e.key === ' ') {
+        e.preventDefault();
+        drawFlash();
+      } else if (e.key.toLowerCase() === 'n') nextPrize();
+      else if (e.key.toLowerCase() === 'u') undoLastPrize();
+      else if (e.key.toLowerCase() === 'r') resetRound();
     }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, [setupOpen, revealStep, revealedPairs, currentPrizeIndex, winnersByPrizeId, remainingList]);
 
   const progress = useMemo(() => ({ done: Object.keys(winnersByPrizeId).length, total: prizes.length || 100 }), [winnersByPrizeId, prizes.length]);
-  const currentWinner = currentPrize ? dedupedParticipants.find(p => p.id === winnersByPrizeId[currentPrize.id]) : null;
+  const currentWinner = currentPrize ? dedupedParticipants.find((p) => p.id === winnersByPrizeId[currentPrize.id]) ?? null : null;
 
   // ------------------------------
   // UI: Presenter + Settings Panel
@@ -492,14 +577,26 @@ export default function App() {
                 {currentPrize && (
                   <div className="mt-2 flex items-center gap-2 text-sm opacity-90">
                     {currentPrize.eligible.map((t) => (
-                      <span key={t} className={classNames("inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium", t === "T1" && "bg-[#D97706]/20 text-[#F1C27D] border border-[#D97706]/30", t === "T2" && "bg-[#2563EB]/20 text-[#A6C8FF] border border-[#2563EB]/30", t === "T3" && "bg-[#0D9488]/20 text-[#74E0D6] border border-[#0D9488]/30")}>{t}</span>
+                      <span
+                        key={t}
+                        className={
+                          classNames(
+                            'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium',
+                            t === 'T1' && 'bg-[#D97706]/20 text-[#F1C27D] border border-[#D97706]/30',
+                            t === 'T2' && 'bg-[#2563EB]/20 text-[#A6C8FF] border border-[#2563EB]/30',
+                            t === 'T3' && 'bg-[#0D9488]/20 text-[#74E0D6] border border-[#0D9488]/30'
+                          )
+                        }
+                      >
+                        {t}
+                      </span>
                     ))}
                     <span className="opacity-60">•</span>
                     <span>Remaining pool: {eligibleForCurrent.length}</span>
                   </div>
                 )}
               </div>
-              <div className="text-sm opacity-80"/>
+              <div className="text-sm opacity-80" />
             </div>
 
             {/* Meta label above cards */}
@@ -510,10 +607,17 @@ export default function App() {
               {revealedPairs.map((p, i) => {
                 const active = i === revealStep && !currentWinner;
                 return (
-                  <div key={i} className={classNames(
-                    "relative rounded-2xl border bg-[#0E0E0E] h-24 md:h-28 flex items-center justify-center text-3xl md:text-5xl font-extrabold tracking-widest overflow-hidden",
-                    active ? "border-amber-400/60 shadow-[0_0_0_1px_rgba(245,158,11,0.2),0_0_30px_rgba(245,158,11,0.25)]" : "border-[#27272A]"
-                  )}>
+                  <div
+                    key={i}
+                    className={
+                      classNames(
+                        'relative rounded-2xl border bg-[#0E0E0E] h-24 md:h-28 flex items-center justify-center text-3xl md:text-5xl font-extrabold tracking-widest overflow-hidden',
+                        active
+                          ? 'border-amber-400/60 shadow-[0_0_0_1px_rgba(245,158,11,0.2),0_0_30px_rgba(245,158,11,0.25)]'
+                          : 'border-[#27272A]'
+                      )
+                    }
+                  >
                     {active && <div className="absolute inset-0 bg-gradient-to-b from-amber-300/25 via-transparent to-amber-400/10" />}
                     <div className="relative z-10">{i < revealStep ? p : active && spinning ? spinValue : p}</div>
                     <div className="absolute top-0 left-0 right-0 h-3 bg-gradient-to-b from-black/40 to-transparent" />
@@ -531,25 +635,48 @@ export default function App() {
                   disabled={spinning}
                   title="Draw (Space)"
                   aria-label="Draw (Flash)"
-                  className={classNames(
-                    "relative w-14 h-14 rounded-full flex items-center justify-center font-bold text-xl",
-                    "bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500",
-                    "shadow-[0_10px_25px_rgba(245,158,11,0.35)] border border-amber-300/40",
-                    spinning && "opacity-80"
-                  )}
+                  className={
+                    classNames(
+                      'relative w-14 h-14 rounded-full flex items-center justify-center font-bold text-xl',
+                      'bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500',
+                      'shadow-[0_10px_25px_rgba(245,158,11,0.35)] border border-amber-300/40',
+                      spinning && 'opacity-80'
+                    )
+                  }
                 >
                   ⚡️
                 </button>
               )}
 
               {currentPrize && (
-                <button onClick={resetRound} title="Reset round (R)" aria-label="Reset round" className="w-12 h-12 rounded-full bg-[#27272A] border border-[#3a3a3f] flex items-center justify-center text-lg">↻</button>
+                <button
+                  onClick={resetRound}
+                  title="Reset round (R)"
+                  aria-label="Reset round"
+                  className="w-12 h-12 rounded-full bg-[#27272A] border border-[#3a3a3f] flex items-center justify-center text-lg"
+                >
+                  ↻
+                </button>
               )}
               {currentPrize && (
-                <button onClick={nextPrize} title="Next prize (N)" aria-label="Next prize" className="w-12 h-12 rounded-full bg-[#27272A] border border-[#3a3a3f] flex items-center justify-center text-lg">⏭️</button>
+                <button
+                  onClick={nextPrize}
+                  title="Next prize (N)"
+                  aria-label="Next prize"
+                  className="w-12 h-12 rounded-full bg-[#27272A] border border-[#3a3a3f] flex items-center justify-center text-lg"
+                >
+                  ⏭️
+                </button>
               )}
               {currentPrize && (
-                <button onClick={undoLastPrize} title="Undo last (U)" aria-label="Undo last" className="w-12 h-12 rounded-full bg-[#27272A] border border-[#3a3a3f] flex items-center justify-center text-lg">↩️</button>
+                <button
+                  onClick={undoLastPrize}
+                  title="Undo last (U)"
+                  aria-label="Undo last"
+                  className="w-12 h-12 rounded-full bg-[#27272A] border border-[#3a3a3f] flex items-center justify-center text-lg"
+                >
+                  ↩️
+                </button>
               )}
             </div>
           </div>
@@ -561,7 +688,9 @@ export default function App() {
               <div className="relative z-10 flex items-center justify-between">
                 <div className="text-lg md:text-xl font-bold">🎉 Winner: {currentWinner.name}</div>
                 <div className="flex items-center gap-2">
-                  <span className="px-2.5 py-1 rounded-full text-sm font-medium bg-[#2563EB]/20 text-[#A6C8FF] border border-[#2563EB]/30">Tier {currentWinner.tier.slice(1)}</span>
+                  <span className="px-2.5 py-1 rounded-full text-sm font-medium bg-[#2563EB]/20 text-[#A6C8FF] border border-[#2563EB]/30">
+                    Tier {currentWinner.tier.slice(1)}
+                  </span>
                 </div>
               </div>
               <div className="relative z-10 mt-2 text-lg md:text-xl opacity-90">
@@ -619,73 +748,189 @@ export default function App() {
           <div className="absolute right-0 top-0 h-full w-full max-w-3xl bg-neutral-950 border-l border-neutral-800 p-6 overflow-auto">
             <div className="flex items-center justify-between mb-4">
               <div className="text-lg font-semibold">Settings</div>
-              <button className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center" onClick={() => setSettingsOpen(false)} title="Close" aria-label="Close">✖️</button>
+              <button
+                className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center"
+                onClick={() => setSettingsOpen(false)}
+                title="Close"
+                aria-label="Close"
+              >
+                ✖️
+              </button>
             </div>
 
             <div className="grid grid-cols-12 gap-6">
               {/* Participants */}
               <div className="col-span-12 xl:col-span-5 rounded-2xl p-5 bg-neutral-900 border border-neutral-800">
                 <div className="text-lg font-semibold">Participants</div>
-                <div className="mt-3 text-sm opacity-80">CSV headers: <code>name,phone,tier</code></div>
+                <div className="mt-3 text-sm opacity-80">
+                  CSV headers: <code>name,phone,tier</code>
+                </div>
                 <div className="mt-3 flex items-center gap-3">
                   <input type="file" accept=".csv" onChange={handleParticipantsCSVFile} className="text-sm" />
-                  <button className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center" onClick={() => setParticipants(generateSampleParticipants(5000))} title="Load sample 5000" aria-label="Load sample">📂</button>
-                  <button className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 disabled:opacity-50 flex items-center justify-center" disabled={!participants.length || frozen} onClick={() => setFrozen(true)} title={frozen?"List locked":"Lock list"} aria-label="Lock list">🔒</button>
+                  <button
+                    className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center"
+                    onClick={() => setParticipants(generateSampleParticipants(5000))}
+                    title="Load sample 5000"
+                    aria-label="Load sample"
+                  >
+                    📂
+                  </button>
+                  <button
+                    className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 disabled:opacity-50 flex items-center justify-center"
+                    disabled={!participants.length || frozen}
+                    onClick={() => setFrozen(true)}
+                    title={frozen ? 'List locked' : 'Lock list'}
+                    aria-label="Lock list"
+                  >
+                    🔒
+                  </button>
                 </div>
-                <div className="mt-3 text-sm">Total uploaded: <span className="font-semibold">{participants.length}</span> • Deduplicated: <span className="font-semibold">{dedupedParticipants.length}</span></div>
-                <div className="mt-3 grid grid-cols-3 gap-2 text-sm">{["T1","T2","T3"].map((t) => (
-                  <div key={t} className="rounded-lg bg-neutral-800 border border-neutral-700 p-3"><div className="opacity-70">{t}</div><div className="text-xl font-bold">{dedupedParticipants.filter(p=>p.tier===t).length}</div></div>
-                ))}</div>
+                <div className="mt-3 text-sm">
+                  Total uploaded: <span className="font-semibold">{participants.length}</span> • Deduplicated: <span className="font-semibold">{dedupedParticipants.length}</span>
+                </div>
+                <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
+                  {(['T1', 'T2', 'T3'] as Tier[]).map((t) => (
+                    <div key={t} className="rounded-lg bg-neutral-800 border border-neutral-700 p-3">
+                      <div className="opacity-70">{t}</div>
+                      <div className="text-xl font-bold">{dedupedParticipants.filter((p) => p.tier === t).length}</div>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               {/* Prizes */}
               <div className="col-span-12 xl:col-span-7 rounded-2xl p-5 bg-neutral-900 border border-neutral-800">
                 <div className="text-lg font-semibold">Prizes</div>
-                <div className="mt-3 text-sm opacity-80">CSV headers: <code>label,eligible,group,subtitle,id</code></div>
+                <div className="mt-3 text-sm opacity-80">
+                  CSV headers: <code>label,eligible,group,subtitle,id</code>
+                </div>
                 <div className="mt-3 flex items-center gap-3">
                   <input type="file" accept=".csv" onChange={handlePrizesCSVFile} className="text-sm" />
-                  <button className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center" onClick={() => setPrizes(buildDefaultPrizes())} title="Load sample 100" aria-label="Load sample prizes">🎁</button>
+                  <button
+                    className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center"
+                    onClick={() => setPrizes(buildDefaultPrizes())}
+                    title="Load sample 100"
+                    aria-label="Load sample prizes"
+                  >
+                    🎁
+                  </button>
                 </div>
                 <div className="mt-3 text-sm">Total prizes: <span className="font-semibold">{prizes.length}</span></div>
                 <div className="mt-3 rounded-xl bg-neutral-800 border border-neutral-700 p-4 max-h-56 overflow-auto">
                   <table className="w-full text-xs">
-                    <thead><tr className="text-left opacity-70"><th className="py-1 pr-2">#</th><th className="py-1 pr-2">Label</th><th className="py-1 pr-2">Group</th><th className="py-1 pr-2">Eligible</th></tr></thead>
+                    <thead>
+                      <tr className="text-left opacity-70">
+                        <th className="py-1 pr-2">#</th>
+                        <th className="py-1 pr-2">Label</th>
+                        <th className="py-1 pr-2">Group</th>
+                        <th className="py-1 pr-2">Eligible</th>
+                      </tr>
+                    </thead>
                     <tbody>
                       {prizes.slice(0, 50).map((pz, i) => (
-                        <tr key={pz.id} className="border-t border-neutral-700/60"><td className="py-1 pr-2">{i+1}</td><td className="py-1 pr-2">{pz.label}</td><td className="py-1 pr-2">{pz.group}</td><td className="py-1 pr-2">{pz.eligible.join(', ')}</td></tr>
+                        <tr key={pz.id} className="border-t border-neutral-700/60">
+                          <td className="py-1 pr-2">{i + 1}</td>
+                          <td className="py-1 pr-2">{pz.label}</td>
+                          <td className="py-1 pr-2">{pz.group}</td>
+                          <td className="py-1 pr-2">{pz.eligible.join(', ')}</td>
+                        </tr>
                       ))}
                     </tbody>
                   </table>
-                  {prizes.length > 50 && <div className="text-xs opacity-70 mt-2">(+{prizes.length-50} more…)</div>}
+                  {prizes.length > 50 && <div className="text-xs opacity-70 mt-2">(+{prizes.length - 50} more…)</div>}
                 </div>
 
                 <div className="mt-4 rounded-xl bg-neutral-800 border border-neutral-700 p-4">
                   <div className="text-sm opacity-80 mb-2">Winners so far</div>
                   <div className="max-h-64 overflow-auto">
                     <table className="w-full text-sm">
-                      <thead><tr className="text-left opacity-70"><th className="py-1 pr-2">#</th><th className="py-1 pr-2">Prize</th><th className="py-1 pr-2">Group</th><th className="py-1 pr-2">Winner</th><th className="py-1 pr-2">Phone</th><th className="py-1 pr-2">Tier</th></tr></thead>
+                      <thead>
+                        <tr className="text-left opacity-70">
+                          <th className="py-1 pr-2">#</th>
+                          <th className="py-1 pr-2">Prize</th>
+                          <th className="py-1 pr-2">Group</th>
+                          <th className="py-1 pr-2">Winner</th>
+                          <th className="py-1 pr-2">Phone</th>
+                          <th className="py-1 pr-2">Tier</th>
+                        </tr>
+                      </thead>
                       <tbody>
-                        {prizes.map((pz,i)=>{ const wid=winnersByPrizeId[pz.id]; const w=dedupedParticipants.find(p=>p.id===wid); return (
-                          <tr key={pz.id} className="border-t border-neutral-700/60"><td className="py-1 pr-2">{i+1}</td><td className="py-1 pr-2">{pz.label}</td><td className="py-1 pr-2">{pz.group}</td><td className="py-1 pr-2">{w? w.name : "—"}</td><td className="py-1 pr-2">{w? w.phoneNorm : "—"}</td><td className="py-1 pr-2">{w? w.tier : "—"}</td></tr>
-                        );})}
+                        {prizes.map((pz, i) => {
+                          const wid = winnersByPrizeId[pz.id];
+                          const w = dedupedParticipants.find((p) => p.id === wid);
+                          return (
+                            <tr key={pz.id} className="border-t border-neutral-700/60">
+                              <td className="py-1 pr-2">{i + 1}</td>
+                              <td className="py-1 pr-2">{pz.label}</td>
+                              <td className="py-1 pr-2">{pz.group}</td>
+                              <td className="py-1 pr-2">{w ? w.name : '—'}</td>
+                              <td className="py-1 pr-2">{w ? w.phoneNorm : '—'}</td>
+                              <td className="py-1 pr-2">{w ? w.tier : '—'}</td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
                   <div className="mt-3 flex items-center gap-2">
-                    <label className="inline-flex items-center gap-2 text-sm"><input type="checkbox" className="accent-neutral-300" checked={maskWinnerPhone} onChange={(e)=>setMaskWinnerPhone(e.target.checked)} />Mask winner phone on stream</label>
-                    <button className="w-10 h-10 rounded-full bg-neutral-700 flex items-center justify-center" onClick={() => {
-                      const items = prizes.map((pz, i) => {
-                        const wid = winnersByPrizeId[pz.id];
-                        const w = dedupedParticipants.find((p) => p.id === wid);
-                        return { order: i + 1, prizeId: pz.id, prizeLabel: pz.label, group: pz.group, eligible: pz.eligible, winner: w ? { name: w.name, phone: w.phoneNorm, tier: w.tier } : null };
-                      });
-                      const blob = new Blob([JSON.stringify({ eventTitle, seedText, participantCount: dedupedParticipants.length, timestamp: new Date().toISOString(), results: items }, null, 2)], { type: "application/json" });
-                      const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `lottery-results-${Date.now()}.json`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-                    }} title="Export results (JSON)" aria-label="Export results">⬇️</button>
+                    <label className="inline-flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="accent-neutral-300"
+                        checked={maskWinnerPhone}
+                        onChange={(e) => setMaskWinnerPhone(e.target.checked)}
+                      />
+                      Mask winner phone on stream
+                    </label>
+                    <button
+                      className="w-10 h-10 rounded-full bg-neutral-700 flex items-center justify-center"
+                      onClick={() => {
+                        const items = prizes.map((pz, i) => {
+                          const wid = winnersByPrizeId[pz.id];
+                          const w = dedupedParticipants.find((p) => p.id === wid);
+                          return {
+                            order: i + 1,
+                            prizeId: pz.id,
+                            prizeLabel: pz.label,
+                            group: pz.group,
+                            eligible: pz.eligible,
+                            winner: w ? { name: w.name, phone: w.phoneNorm, tier: w.tier } : null,
+                          };
+                        });
+                        const blob = new Blob(
+                          [
+                            JSON.stringify(
+                              {
+                                eventTitle,
+                                seedText,
+                                participantCount: dedupedParticipants.length,
+                                timestamp: new Date().toISOString(),
+                                results: items,
+                              },
+                              null,
+                              2
+                            ),
+                          ],
+                          { type: 'application/json' }
+                        );
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `lottery-results-${Date.now()}.json`;
+                        document.body.appendChild(a);
+                        a.click();
+                        a.remove();
+                        URL.revokeObjectURL(url);
+                      }}
+                      title="Export results (JSON)"
+                      aria-label="Export results"
+                    >
+                      ⬇️
+                    </button>
                   </div>
                 </div>
 
-                {new URLSearchParams(window.location.search).get("test") === "1" && (
+                {new URLSearchParams(window.location.search).get('test') === '1' && (
                   <div className="mt-4 rounded-xl bg-neutral-800 border border-neutral-700 p-4">
                     <div className="text-sm font-semibold mb-2">Self-tests</div>
                     <SelfTests />
@@ -698,7 +943,14 @@ export default function App() {
       )}
 
       {/* Settings button (symbol-only) */}
-      <button aria-label="Settings" className="fixed top-6 right-6 rounded-full w-9 h-9 flex items-center justify-center bg-neutral-800 border border-neutral-700 hover:bg-neutral-700" onClick={() => setSettingsOpen(true)} title="Open settings">⚙️</button>
+      <button
+        aria-label="Settings"
+        className="fixed top-6 right-6 rounded-full w-9 h-9 flex items-center justify-center bg-neutral-800 border border-neutral-700 hover:bg-neutral-700"
+        onClick={() => setSettingsOpen(true)}
+        title="Open settings"
+      >
+        ⚙️
+      </button>
 
       {/* SETUP OVERLAY */}
       {setupOpen && (
@@ -709,22 +961,44 @@ export default function App() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="rounded-xl bg-[#161616] border border-[#27272A] p-4">
                 <div className="font-medium mb-2">Participants CSV</div>
-                <div className="opacity-80 mb-3">Headers: <code>name,phone,tier</code></div>
+                <div className="opacity-80 mb-3">
+                  Headers: <code>name,phone,tier</code>
+                </div>
                 <div className="flex items-center gap-3">
                   <input type="file" accept=".csv" onChange={handleParticipantsCSVFile} />
-                  <button className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center" onClick={() => setParticipants(generateSampleParticipants(5000))} title="Load sample 5000" aria-label="Load sample participants">📂</button>
+                  <button
+                    className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center"
+                    onClick={() => setParticipants(generateSampleParticipants(5000))}
+                    title="Load sample 5000"
+                    aria-label="Load sample participants"
+                  >
+                    📂
+                  </button>
                 </div>
-                <div className="mt-3 text-xs opacity-80">Loaded: <span className="font-semibold">{participants.length}</span> • Deduped: <span className="font-semibold">{dedupedParticipants.length}</span></div>
+                <div className="mt-3 text-xs opacity-80">
+                  Loaded: <span className="font-semibold">{participants.length}</span> • Deduped: <span className="font-semibold">{dedupedParticipants.length}</span>
+                </div>
               </div>
 
               <div className="rounded-xl bg-[#161616] border border-[#27272A] p-4">
                 <div className="font-medium mb-2">Prizes CSV</div>
-                <div className="opacity-80 mb-3">Headers: <code>label,eligible,group,subtitle,id</code></div>
+                <div className="opacity-80 mb-3">
+                  Headers: <code>label,eligible,group,subtitle,id</code>
+                </div>
                 <div className="flex items-center gap-3">
                   <input type="file" accept=".csv" onChange={handlePrizesCSVFile} />
-                  <button className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center" onClick={() => setPrizes(buildDefaultPrizes())} title="Load sample 100" aria-label="Load sample prizes">🎁</button>
+                  <button
+                    className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center"
+                    onClick={() => setPrizes(buildDefaultPrizes())}
+                    title="Load sample 100"
+                    aria-label="Load sample prizes"
+                  >
+                    🎁
+                  </button>
                 </div>
-                <div className="mt-3 text-xs opacity-80">Loaded prizes: <span className="font-semibold">{prizes.length}</span></div>
+                <div className="mt-3 text-xs opacity-80">
+                  Loaded prizes: <span className="font-semibold">{prizes.length}</span>
+                </div>
               </div>
             </div>
 
@@ -735,12 +1009,14 @@ export default function App() {
                 onClick={() => setSetupOpen(false)}
                 title="Start show"
                 aria-label="Start show"
-                className={classNames(
-                  "w-12 h-12 rounded-full flex items-center justify-center text-xl",
-                  dedupedParticipants.length && prizes.length ?
-                    "bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500 shadow-[0_10px_25px_rgba(245,158,11,0.35)] border border-amber-300/40" :
-                    "bg-neutral-800 border border-neutral-700 opacity-60"
-                )}
+                className={
+                  classNames(
+                    'w-12 h-12 rounded-full flex items-center justify-center text-xl',
+                    dedupedParticipants.length && prizes.length
+                      ? 'bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500 shadow-[0_10px_25px_rgba(245,158,11,0.35)] border border-amber-300/40'
+                      : 'bg-neutral-800 border border-neutral-700 opacity-60'
+                  )
+                }
               >
                 ▶️
               </button>
@@ -753,14 +1029,22 @@ export default function App() {
 }
 
 function SelfTests() {
-  const [results, setResults] = useState(null);
-  useEffect(() => { setResults(runSelfTests()); }, []);
+  const [results, setResults] = useState<TestResult[] | null>(null);
+  useEffect(() => {
+    setResults(runSelfTests());
+  }, []);
   if (!results) return <div className="text-sm opacity-70">Running…</div>;
-  const okAll = results.every(r=>r.ok);
+  const okAll = results.every((r) => r.ok);
   return (
     <div>
-      <div className={okAll?"text-green-300":"text-red-300"}>Overall: {okAll?"PASS":"FAIL"}</div>
-      <ul className="mt-2 text-xs space-y-1">{results.map((r,i)=>(<li key={i} className={r.ok?"text-neutral-300":"text-red-400"}>{r.ok?"✔":"✖"} {r.name} {r.ok?"":`— ${r.err}`}</li>))}</ul>
+      <div className={okAll ? 'text-green-300' : 'text-red-300'}>Overall: {okAll ? 'PASS' : 'FAIL'}</div>
+      <ul className="mt-2 text-xs space-y-1">
+        {results.map((r, i) => (
+          <li key={i} className={r.ok ? 'text-neutral-300' : 'text-red-400'}>
+            {r.ok ? '✔' : '✖'} {r.name} {r.ok ? '' : `— ${r.err}`}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
