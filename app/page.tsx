@@ -1,3 +1,4 @@
+'use client';
 import React, { useEffect, useMemo, useRef, useState } from "react";
 // Local-only lottery presenter with a dramatic five-card (two digits each) reveal.
 // New features:
