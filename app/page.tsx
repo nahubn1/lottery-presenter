@@ -1,6 +1,9 @@
 'use client';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
+// Helper to gate SSR/CSR differences
+const isBrowser = typeof window !== 'undefined';
+
 // ------------------------------
 // Types
 // ------------------------------
@@ -91,7 +94,7 @@ function canReplaceHistory(): boolean {
   }
 }
 function safeReplaceQueryParam(key: string, value: string | null): void {
-  if (!canReplaceHistory()) return;
+  if (!isBrowser || !canReplaceHistory()) return;
   try {
     const url = new URL(window.location.href);
     if (value === null) url.searchParams.delete(key);
@@ -288,9 +291,21 @@ export default function App() {
   // SETTINGS (slide-over)
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [eventTitle, setEventTitle] = useState<string>('New Year Draw 2025');
-  const [seedText, setSeedText] = useState<string>(() => localStorage.getItem('lottery_seed') || `seed-${Math.random().toString(36).slice(2, 10)}`);
+  // SSR-safe seed state: placeholder on server, sync real value on mount
+  const [seedText, setSeedText] = useState<string>(() => {
+    if (isBrowser) {
+      return localStorage.getItem('lottery_seed') || `seed-${Math.random().toString(36).slice(2, 10)}`;
+    }
+    return 'seed-build';
+  });
   const [maskWinnerPhone, setMaskWinnerPhone] = useState<boolean>(true); // default masked
   useEffect(() => {
+    if (!isBrowser) return;
+    if (seedText === 'seed-build') {
+      const s = localStorage.getItem('lottery_seed') || `seed-${Math.random().toString(36).slice(2, 10)}`;
+      setSeedText(s);
+      return;
+    }
     localStorage.setItem('lottery_seed', seedText);
   }, [seedText]);
 
@@ -930,7 +945,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {new URLSearchParams(window.location.search).get('test') === '1' && (
+                {isBrowser && new URLSearchParams(window.location.search).get('test') === '1' && (
                   <div className="mt-4 rounded-xl bg-neutral-800 border border-neutral-700 p-4">
                     <div className="text-sm font-semibold mb-2">Self-tests</div>
                     <SelfTests />
