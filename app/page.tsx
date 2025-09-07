@@ -251,23 +251,30 @@ function parseParticipantsCSV(text: string): Participant[] {
   return out;
 }
 
-// Expected headers for prizes CSV:
-// label,eligible,group,subtitle,id
+// Expected headers for prizes CSV (order):
+// id,label,group,subtitle,eligible
 function parsePrizesCSV(text: string): Prize[] {
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (lines.length === 0) return [];
   const header = lines[0].split(',').map((h) => h.trim().toLowerCase());
+  const idxId = header.indexOf('id');
   const idxLabel = header.indexOf('label');
-  const idxElig = header.indexOf('eligible');
   const idxGroup = header.indexOf('group');
   const idxSub = header.indexOf('subtitle');
-  const idxId = header.indexOf('id');
-  if (idxLabel === -1) return [];
+  const idxElig = header.indexOf('eligible');
+  if (idxId === -1 || idxLabel === -1) return [];
   const out: Prize[] = [];
+  const seenIds = new Set<string>();
   for (let i = 1; i < lines.length; i++) {
     const row = lines[i].split(',');
+    const rawId = row[idxId]?.trim();
     const rawLabel = row[idxLabel]?.trim();
     if (!rawLabel) continue;
+    let id = rawId || `P-${i}`;
+    // Ensure unique IDs (avoid collapsing prizes with same group/label)
+    if (seenIds.has(id)) id = `${id}-${i}`;
+    seenIds.add(id);
+
     const rawElig = (idxElig !== -1 ? row[idxElig] : '')?.trim() || 'T1,T2,T3';
     const elig = rawElig
       .split(/[|,\s]+/)
@@ -275,7 +282,6 @@ function parsePrizesCSV(text: string): Prize[] {
       .filter((x): x is Tier => ['T1', 'T2', 'T3'].includes(x));
     const group = (idxGroup !== -1 ? row[idxGroup] : '')?.trim() || 'General';
     const subtitle = (idxSub !== -1 ? row[idxSub] : '')?.trim() || '';
-    const id = (idxId !== -1 ? row[idxId] : '')?.trim() || `P-${i}`;
     out.push({ id, label: rawLabel, subtitle, group, eligible: elig.length ? elig : ['T1', 'T2', 'T3'] });
   }
   return out;
@@ -294,7 +300,13 @@ export default function App() {
   // SSR-safe seed state: placeholder on server, sync real value on mount
   const [seedText, setSeedText] = useState<string>(() => {
     if (isBrowser) {
-      return localStorage.getItem('lottery_seed') || `seed-${Math.random().toString(36).slice(2, 10)}`;
+      const stored = localStorage.getItem('lottery_seed');
+      if (stored && /^\d+$/.test(stored)) {
+        const n = Number(stored);
+        if (n >= 1 && n <= 100) return stored;
+      }
+      // Default: random integer 1..100
+      return String(Math.floor(Math.random() * 100) + 1);
     }
     return 'seed-build';
   });
@@ -302,7 +314,13 @@ export default function App() {
   useEffect(() => {
     if (!isBrowser) return;
     if (seedText === 'seed-build') {
-      const s = localStorage.getItem('lottery_seed') || `seed-${Math.random().toString(36).slice(2, 10)}`;
+      const stored = localStorage.getItem('lottery_seed');
+      let s: string | null = null;
+      if (stored && /^\d+$/.test(stored)) {
+        const n = Number(stored);
+        if (n >= 1 && n <= 100) s = stored;
+      }
+      if (!s) s = String(Math.floor(Math.random() * 100) + 1);
       setSeedText(s);
       return;
     }
@@ -338,9 +356,43 @@ export default function App() {
   const winnersSet = useMemo(() => new Set<number>(Object.values(winnersByPrizeId)), [winnersByPrizeId]);
   const currentPrize: Prize | undefined = prizes[currentPrizeIndex];
 
+  // Group draw mode
+  const [groupMode, setGroupMode] = useState<boolean>(false);
+  const [selectedGroup, setSelectedGroup] = useState<string>('');
+  const groupNames = useMemo<string[]>(() => {
+    const s = new Set<string>();
+    for (const p of prizes) s.add(p.group);
+    return Array.from(s);
+  }, [prizes]);
+  useEffect(() => {
+    if (!selectedGroup && groupNames.length) setSelectedGroup(groupNames[0]);
+  }, [groupNames, selectedGroup]);
+  const activeGroupPrizes = useMemo<Prize[]>(() => {
+    if (!groupMode) return [];
+    return prizes.filter((pz) => pz.group === selectedGroup);
+  }, [groupMode, prizes, selectedGroup]);
+
+  // Group-mode: per-card reveal state (independent cards)
+  type CardReveal = { pairs: string[]; step: number; done: boolean; spin?: string; spinning?: boolean };
+  const [groupRevealByPrizeId, setGroupRevealByPrizeId] = useState<Record<string, CardReveal>>({});
+  const groupSpinIntervalRef = useRef<number | null>(null);
+
+  // Ensure reveal state exists for each active group prize; clean up stale
+  useEffect(() => {
+    if (!groupMode) return;
+    setGroupRevealByPrizeId((prev) => {
+      const next: Record<string, CardReveal> = {};
+      for (const pz of activeGroupPrizes) {
+        next[pz.id] = prev[pz.id] || { pairs: ['--', '--', '--', '--', '--'], step: 0, done: false };
+      }
+      return next;
+    });
+  }, [groupMode, activeGroupPrizes.map((p) => p.id).join('|')]);
+
   const eligibleForCurrent = useMemo<Participant[]>(() => {
-    if (!currentPrize) return [];
-    return dedupedParticipants.filter((p) => currentPrize.eligible.includes(p.tier) && !winnersSet.has(p.id));
+    const cp = currentPrize;
+    if (!cp) return [];
+    return dedupedParticipants.filter((p) => cp.eligible.includes(p.tier) && !winnersSet.has(p.id));
   }, [currentPrize, dedupedParticipants, winnersSet]);
 
   // Reveal state (sequential flash pulls)
@@ -364,36 +416,67 @@ export default function App() {
     return pool;
   }, [eligibleForCurrent, revealedPairs, revealStep]);
 
+  // Group-mode: union of remaining candidates across active group prizes,
+  // based on each card's individual revealed prefix so far
+  const groupRemaining = useMemo<Participant[]>(() => {
+    if (!groupMode) return [];
+    const used = winnersSet;
+    const out: Participant[] = [];
+    const seenP = new Set<number>();
+    for (const pz of activeGroupPrizes) {
+      if (winnersByPrizeId[pz.id]) continue; // already has a winner, not in game
+      const rv = groupRevealByPrizeId[pz.id];
+      let pool = dedupedParticipants.filter((p) => pz.eligible.includes(p.tier) && !used.has(p.id));
+      if (rv && rv.step > 0) {
+        pool = pool.filter((p) => {
+          const ps = phoneToPairs10(p.phoneNorm);
+          for (let i = 0; i < rv.step; i++) if (ps[i] !== rv.pairs[i]) return false;
+          return true;
+        });
+      }
+      for (const p of pool) {
+        if (!seenP.has(p.id)) { seenP.add(p.id); out.push(p); }
+      }
+    }
+    return out;
+  }, [groupMode, activeGroupPrizes, dedupedParticipants, winnersSet, groupRevealByPrizeId, winnersByPrizeId]);
+
   // If exactly one participant remains, auto-complete reveal & finalize winner
   useEffect(() => {
-    if (!currentPrize) return;
-    if (winnersByPrizeId[currentPrize.id]) return;
+    if (groupMode) return; // only for single-prize mode
+    const cp = currentPrize;
+    if (!cp) return;
+    const cpId = cp.id;
+    if (winnersByPrizeId[cpId]) return;
     if (remainingList.length === 1 && revealStep < 5 && !spinning) {
       const only = remainingList[0];
       const pairs = phoneToPairs10(only.phoneNorm);
       stopSpin();
       setRevealedPairs(pairs);
       setRevealStep(5);
-      setWinnersByPrizeId((prev) => ({ ...prev, [currentPrize.id]: only.id }));
+      setWinnersByPrizeId((prev) => ({ ...prev, [cpId]: only.id }));
       setShowConfetti(true);
       const t = setTimeout(() => setShowConfetti(false), 3500);
       return () => clearTimeout(t);
     }
-  }, [remainingList, revealStep, spinning, currentPrize, winnersByPrizeId]);
+  }, [groupMode, remainingList, revealStep, spinning, currentPrize, winnersByPrizeId]);
 
   // Master PRF for reproducibility per prize+step
   const prfForStep = (step: number, extra = ''): (() => number) => {
-    const base = `${seedText}|${currentPrize?.id || 'NOPRIZE'}|step:${step}|prefix:${revealedPairs.join('')}|${extra}`;
+    const scope = groupMode ? `GROUP:${selectedGroup}` : (currentPrize?.id || 'NOPRIZE');
+    const base = `${seedText}|${scope}|step:${step}|prefix:${revealedPairs.join('')}|${extra}`;
     const seed = hashStringToInt32(base);
     return mulberry32(seed);
   };
 
   // Weighted pick next pair ~ proportional to counts among remaining participants
   function pickNextPairWeighted(): string | null {
-    if (!currentPrize) return null;
+    if (groupMode && activeGroupPrizes.length === 0) return null;
+    if (!groupMode && !currentPrize) return null;
     if (revealStep >= 5) return null;
     const counts: Record<string, number> = {};
-    for (const p of remainingList) {
+    const pool = groupMode ? groupRemaining : remainingList;
+    for (const p of pool) {
       const pair = phoneToPairs10(p.phoneNorm)[revealStep];
       counts[pair] = (counts[pair] || 0) + 1;
     }
@@ -417,6 +500,37 @@ export default function App() {
     setShowConfetti(false);
   }
 
+  // Group-mode helpers: reset/next/prev group
+  function resetCurrentGroup(): void {
+    if (!groupMode) return;
+    setGroupRevealByPrizeId((prev) => {
+      const next = { ...prev } as Record<string, CardReveal>;
+      for (const pz of prizes.filter((p) => p.group === selectedGroup)) {
+        next[pz.id] = { pairs: ['--', '--', '--', '--', '--'], step: 0, done: false };
+      }
+      return next;
+    });
+    setWinnersByPrizeId((prev) => {
+      const copy = { ...prev } as Record<string, number>;
+      for (const pz of prizes.filter((p) => p.group === selectedGroup)) delete copy[pz.id];
+      return copy;
+    });
+    setShowConfetti(false);
+  }
+
+  function nextGroup(): void {
+    if (!groupMode || groupNames.length === 0) return;
+    const idx = Math.max(0, groupNames.indexOf(selectedGroup));
+    const next = groupNames[(idx + 1) % groupNames.length];
+    setSelectedGroup(next);
+  }
+  function prevGroup(): void {
+    if (!groupMode || groupNames.length === 0) return;
+    const idx = Math.max(0, groupNames.indexOf(selectedGroup));
+    const prev = groupNames[(idx - 1 + groupNames.length) % groupNames.length];
+    setSelectedGroup(prev);
+  }
+
   function nextPrize(): void {
     resetRound();
     setCurrentPrizeIndex((i) => Math.min(i + 1, prizes.length - 1));
@@ -435,23 +549,140 @@ export default function App() {
     resetRound();
   }
 
-  // DRAW (Flash) implementation
+  // Rewritten DRAW (Flash) implementation (ASCII-safe)
   function drawFlash(): void {
-    if (!currentPrize) return;
-    if (winnersByPrizeId[currentPrize.id]) return; // already assigned
-    if (spinning) return;
+    // Group mode: stepwise reveal per card across the group
+    if (groupMode) {
+      if (activeGroupPrizes.length === 0) return;
 
-    // If only one candidate already, auto logic will handle via useEffect.
-    if (remainingList.length === 1) return;
+      // Start spin on all in-play cards (not done, no winner yet)
+      setGroupRevealByPrizeId((prev) => {
+        const next = { ...prev } as Record<string, CardReveal>;
+        for (const pz of activeGroupPrizes) {
+          if (winnersByPrizeId[pz.id]) continue;
+          const r = next[pz.id] || { pairs: ['--', '--', '--', '--', '--'], step: 0, done: false };
+          if (r.done || r.step >= 5) continue;
+          next[pz.id] = { ...r, spinning: true, spin: r.spin ?? '--' };
+        }
+        return next;
+      });
+
+      if (groupSpinIntervalRef.current) {
+        window.clearInterval(groupSpinIntervalRef.current);
+        groupSpinIntervalRef.current = null;
+      }
+      // Update spin digits every 50ms across all spinning cards
+      groupSpinIntervalRef.current = window.setInterval(() => {
+        setGroupRevealByPrizeId((prev) => {
+          const next = { ...prev } as Record<string, CardReveal>;
+          for (const id in next) {
+            const r = next[id];
+            if (r?.spinning) {
+              const v = Math.floor(Math.random() * 100).toString().padStart(2, '0');
+              next[id] = { ...r, spin: v };
+            }
+          }
+          return next;
+        });
+      }, 50);
+
+      // After short delay, stop spinning and lock chosen pair per card
+      window.setTimeout(() => {
+        if (groupSpinIntervalRef.current) {
+          window.clearInterval(groupSpinIntervalRef.current);
+          groupSpinIntervalRef.current = null;
+        }
+
+        const nextReveals: Record<string, CardReveal> = { ...groupRevealByPrizeId };
+        const usedGlobal = new Set<number>(Object.values(winnersByPrizeId));
+
+        for (const pz of activeGroupPrizes) {
+          if (winnersByPrizeId[pz.id]) continue;
+          const r0 = nextReveals[pz.id] || { pairs: ['--', '--', '--', '--', '--'], step: 0, done: false };
+          if (r0.done || r0.step >= 5) continue;
+
+          // Build pool for this prize based on its own prefix
+          let pool = dedupedParticipants.filter((p) => pz.eligible.includes(p.tier) && !usedGlobal.has(p.id));
+          if (r0.step > 0) {
+            pool = pool.filter((p) => {
+              const ps = phoneToPairs10(p.phoneNorm);
+              for (let i = 0; i < r0.step; i++) if (ps[i] !== r0.pairs[i]) return false;
+              return true;
+            });
+          }
+
+          // Weighted pick for this step for this prize (deterministic)
+          const counts: Record<string, number> = {};
+          for (const p of pool) {
+            const pair = phoneToPairs10(p.phoneNorm)[r0.step];
+            counts[pair] = (counts[pair] || 0) + 1;
+          }
+          const entries = Object.entries(counts);
+          let chosen: string;
+          if (entries.length === 0) {
+            const rng = mulberry32(hashStringToInt32(`${seedText}|PRIZE:${pz.id}|step:${r0.step}|fallback`));
+            chosen = Math.floor(rng() * 100).toString().padStart(2, '0');
+          } else {
+            const total = entries.reduce((s, [, c]) => s + c, 0);
+            const rng = (() => {
+              const base = `${seedText}|PRIZE:${pz.id}|step:${r0.step}|prefix:${r0.pairs.slice(0, r0.step).join('')}`;
+              return mulberry32(hashStringToInt32(base));
+            })();
+            let rnum = rng() * total;
+            chosen = entries[entries.length - 1][0];
+            for (const [pair, c] of entries) if ((rnum -= c) <= 0) { chosen = pair; break; }
+          }
+          const newPairs = r0.pairs.slice();
+          newPairs[r0.step] = chosen;
+          nextReveals[pz.id] = { pairs: newPairs, step: r0.step + 1, done: false, spinning: false, spin: undefined };
+        }
+
+        // Finalize winners for any that reached 5
+        const updates: Record<string, number> = {};
+        const used = new Set<number>(Object.values(winnersByPrizeId));
+        for (const pz of activeGroupPrizes) {
+          const r = nextReveals[pz.id];
+          if (!r || r.step < 5 || r.done || winnersByPrizeId[pz.id]) continue;
+          let pool = dedupedParticipants.filter((p) => pz.eligible.includes(p.tier) && !used.has(p.id));
+          pool = pool.filter((p) => {
+            const ps = phoneToPairs10(p.phoneNorm);
+            for (let i = 0; i < 5; i++) if (ps[i] !== r.pairs[i]) return false;
+            return true;
+          });
+          const winner = pool[0];
+          if (winner) {
+            updates[pz.id] = winner.id;
+            used.add(winner.id);
+            nextReveals[pz.id] = { ...r, done: true };
+          }
+        }
+
+        setGroupRevealByPrizeId(nextReveals);
+        if (Object.keys(updates).length) {
+          setWinnersByPrizeId((prev) => ({ ...prev, ...updates }));
+          setShowConfetti(true);
+          window.setTimeout(() => setShowConfetti(false), 3500);
+        }
+      }, 900);
+
+      return;
+    }
+    if (spinning) return;
+    const currentPrizeId = currentPrize?.id;
+    if (!groupMode) {
+      if (!currentPrizeId) return;
+      if (winnersByPrizeId[currentPrizeId]) return; // already assigned
+      if (remainingList.length === 1) return;
+    } else {
+      if (activeGroupPrizes.length === 0) return;
+    }
 
     // Start spin animation cycling 00..99 while we compute final selection
     const rngAnim = prfForStep(revealStep + 1, 'anim');
     setSpinning(true);
     stopSpin();
     spinIntervalRef.current = window.setInterval(() => {
-      const v = Math.floor(rngAnim() * 100)
-        .toString()
-        .padStart(2, '0');
+      const v = Math.floor(rngAnim() * 100).toString().padStart(2, '0');
       setSpinValue(v);
     }, 50);
 
@@ -464,7 +695,7 @@ export default function App() {
       return;
     }
 
-    window.setTimeout(() => {
+    window.setTimeout((): void => {
       stopSpin();
       const next = revealedPairs.slice();
       next[revealStep] = chosen;
@@ -474,21 +705,47 @@ export default function App() {
       setSpinning(false);
 
       if (ns >= 5) {
-        const finalPool = remainingList.filter((p) => {
-          const ps = phoneToPairs10(p.phoneNorm);
-          for (let i = 0; i < 5; i++) if (ps[i] !== next[i]) return false;
-          return true;
-        });
-        const winner = finalPool[0] || remainingList[0];
-        if (!winner) {
-          alert('No participant matched the final digits — please verify inputs.');
-          return;
+        if (!groupMode) {
+          const finalPool = remainingList.filter((p) => {
+            const ps = phoneToPairs10(p.phoneNorm);
+            for (let i = 0; i < 5; i++) if (ps[i] !== next[i]) return false;
+            return true;
+          });
+          const winner = finalPool[0] || remainingList[0];
+          if (!winner) {
+            alert('No participant matched the final digits - please verify inputs.');
+            return;
+          }
+          setWinnersByPrizeId((prev) => ({ ...prev, [currentPrizeId!]: winner.id }));
+          setShowConfetti(true);
+          window.setTimeout(() => setShowConfetti(false), 3500);
+        } else {
+          const updates: Record<string, number> = {};
+          const used = new Set<number>(Object.values(winnersByPrizeId));
+          for (const pz of activeGroupPrizes) {
+            const pool = dedupedParticipants
+              .filter((p) => pz.eligible.includes(p.tier) && !used.has(p.id))
+              .filter((p) => {
+                const ps = phoneToPairs10(p.phoneNorm);
+                for (let i = 0; i < 5; i++) if (ps[i] !== next[i]) return false;
+                return true;
+              });
+            const win = pool[0];
+            if (win) {
+              updates[pz.id] = win.id;
+              used.add(win.id);
+            }
+          }
+          if (Object.keys(updates).length === 0) {
+            alert('No participants matched for this group - adjust data or tiers.');
+          } else {
+            setWinnersByPrizeId((prev) => ({ ...prev, ...updates }));
+            setShowConfetti(true);
+            window.setTimeout(() => setShowConfetti(false), 3500);
+          }
         }
-        setWinnersByPrizeId((prev) => ({ ...prev, [currentPrize.id]: winner.id }));
-        setShowConfetti(true);
-        window.setTimeout(() => setShowConfetti(false), 3500);
       }
-    }, 1200); // ~1.2s dramatic spin
+    }, 1200);
   }
 
   function stopSpin(): void {
@@ -515,6 +772,10 @@ export default function App() {
       setCurrentPrizeIndex(0);
       setWinnersByPrizeId({});
       resetRound();
+      // If prizes are already loaded, auto-enable the play state
+      if (parsed.length > 0 && prizes.length > 0) {
+        setSetupOpen(false);
+      }
     };
     reader.readAsText(f);
   }
@@ -526,13 +787,17 @@ export default function App() {
       const text = (reader.result as string) || '';
       const parsed = parsePrizesCSV(text);
       if (parsed.length === 0) {
-        alert('Prizes CSV empty/invalid. Headers: label,eligible,group,subtitle,id');
+        alert('Prizes CSV empty/invalid. Headers order: id,label,group,subtitle,eligible');
         return;
       }
       setPrizes(parsed);
       setCurrentPrizeIndex(0);
       setWinnersByPrizeId({});
       resetRound();
+      // If participants are already loaded, auto-enable the play state
+      if (parsed.length > 0 && dedupedParticipants.length > 0) {
+        setSetupOpen(false);
+      }
     };
     reader.readAsText(f);
   }
@@ -544,16 +809,25 @@ export default function App() {
       if (e.key === ' ') {
         e.preventDefault();
         drawFlash();
-      } else if (e.key.toLowerCase() === 'n') nextPrize();
-      else if (e.key.toLowerCase() === 'u') undoLastPrize();
-      else if (e.key.toLowerCase() === 'r') resetRound();
+      } else if (e.key.toLowerCase() === 'n') {
+        if (groupMode) nextGroup(); else nextPrize();
+      } else if (e.key.toLowerCase() === 'u') {
+        if (!groupMode) undoLastPrize();
+      } else if (e.key.toLowerCase() === 'r') {
+        if (groupMode) resetCurrentGroup(); else resetRound();
+      } else if (e.key.toLowerCase() === 'p') {
+        if (groupMode) prevGroup();
+      }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [setupOpen, revealStep, revealedPairs, currentPrizeIndex, winnersByPrizeId, remainingList]);
+  }, [setupOpen, groupMode, revealStep, revealedPairs, currentPrizeIndex, winnersByPrizeId, remainingList]);
 
   const progress = useMemo(() => ({ done: Object.keys(winnersByPrizeId).length, total: prizes.length || 100 }), [winnersByPrizeId, prizes.length]);
-  const currentWinner = currentPrize ? dedupedParticipants.find((p) => p.id === winnersByPrizeId[currentPrize.id]) ?? null : null;
+  const currentPrizeId = currentPrize?.id;
+  const currentWinner = currentPrizeId
+    ? dedupedParticipants.find((p) => p.id === winnersByPrizeId[currentPrizeId]) ?? null
+    : null;
 
   // ------------------------------
   // UI: Presenter + Settings Panel
@@ -573,23 +847,23 @@ export default function App() {
       </div>
 
       {/* Main grid */}
-      <div className="relative grid grid-cols-12 gap-6 px-6 pb-6 h-[calc(100%-72px)]">
+      <div className="relative grid grid-cols-12 gap-6 px-6 pb-28 h-[calc(100%-72px)]">
         {/* Confetti overlay */}
         <Confetti show={showConfetti} />
 
-        <div className="col-span-12 lg:col-span-8 flex flex-col gap-6">
+        <div className="col-span-12 lg:col-span-8 min-h-0 flex flex-col gap-6">
           {/* Meta + Cards */}
-          <div className="rounded-2xl p-5 bg-[#161616]/80 border border-[#27272A] shadow-lg flex flex-col">
+          <div className="rounded-2xl p-5 bg-[#161616]/80 border border-[#27272A] shadow-lg flex flex-col min-h-0">
             {/* Meta row */}
             <div className="flex items-start justify-between gap-4">
               <div>
-                {currentPrize && (
+                { !groupMode && currentPrize && ( 
                   <div className="text-lg md:text-xl font-semibold">
                     {currentPrize.group === 'Major' ? 'Major Prize' : currentPrize.label}
                     {currentPrize.subtitle ? <span> • {currentPrize.subtitle}</span> : null}
                   </div>
                 )}
-                {currentPrize && (
+                { !groupMode && currentPrize && ( 
                   <div className="mt-2 flex items-center gap-2 text-sm opacity-90">
                     {currentPrize.eligible.map((t) => (
                       <span
@@ -617,33 +891,95 @@ export default function App() {
             {/* Meta label above cards */}
             <div className="mt-4 text-xs uppercase tracking-wider opacity-60">Meta</div>
 
-            {/* Five Cards */}
-            <div className="mt-2 grid grid-cols-5 gap-3">
-              {revealedPairs.map((p, i) => {
-                const active = i === revealStep && !currentWinner;
-                return (
-                  <div
-                    key={i}
-                    className={
-                      classNames(
-                        'relative rounded-2xl border bg-[#0E0E0E] h-24 md:h-28 flex items-center justify-center text-3xl md:text-5xl font-extrabold tracking-widest overflow-hidden',
-                        active
-                          ? 'border-amber-400/60 shadow-[0_0_0_1px_rgba(245,158,11,0.2),0_0_30px_rgba(245,158,11,0.25)]'
-                          : 'border-[#27272A]'
-                      )
-                    }
-                  >
-                    {active && <div className="absolute inset-0 bg-gradient-to-b from-amber-300/25 via-transparent to-amber-400/10" />}
-                    <div className="relative z-10">{i < revealStep ? p : active && spinning ? spinValue : p}</div>
-                    <div className="absolute top-0 left-0 right-0 h-3 bg-gradient-to-b from-black/40 to-transparent" />
-                    <div className="absolute bottom-0 left-0 right-0 h-3 bg-gradient-to-t from-black/40 to-transparent" />
-                  </div>
-                );
-              })}
-            </div>
+            {/* Five Cards (single) or Group grid */}
+            {!groupMode ? (
+              <div className="mt-2 grid grid-cols-5 gap-3">
+                {revealedPairs.map((p, i) => {
+                  const active = i === revealStep && !currentWinner;
+                  return (
+                    <div
+                      key={i}
+                      className={
+                        classNames(
+                          'relative rounded-2xl border bg-[#0E0E0E] h-24 md:h-28 flex items-center justify-center text-3xl md:text-5xl font-extrabold tracking-widest overflow-hidden',
+                          active
+                            ? 'border-amber-400/60 shadow-[0_0_0_1px_rgba(245,158,11,0.2),0_0_30px_rgba(245,158,11,0.25)]'
+                            : 'border-[#27272A]'
+                        )
+                      }
+                    >
+                      {active && <div className="absolute inset-0 bg-gradient-to-b from-amber-300/25 via-transparent to-amber-400/10" />}
+                      <div className="relative z-10">{i < revealStep ? p : active && spinning ? spinValue : p}</div>
+                      <div className="absolute top-0 left-0 right-0 h-3 bg-gradient-to-b from-black/40 to-transparent" />
+                      <div className="absolute bottom-0 left-0 right-0 h-3 bg-gradient-to-t from-black/40 to-transparent" />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="mt-2 overflow-y-auto min-h-0 max-h-[48vh] pr-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        {activeGroupPrizes.map((pz) => {
+                  const rv = groupRevealByPrizeId[pz.id] || { pairs: ['--', '--', '--', '--', '--'], step: 0, done: false };
+                  const wid = winnersByPrizeId[pz.id];
+                  const w = wid ? dedupedParticipants.find((pp) => pp.id === wid) : null;
+                  return (
+                    <div key={pz.id} className="rounded-2xl p-4 bg-[#0E0E0E] border border-[#27272A]">
+                      <div className="font-semibold mb-2 truncate" title={pz.label}>{pz.label}</div>
+                      <div className="grid grid-cols-5 gap-2">
+                        {rv.pairs.map((pp, i) => {
+                          const active = i === rv.step && !rv.done && !w;
+                          return (
+                            <div
+                              key={i}
+                              className={
+                                classNames(
+                                  'relative rounded-xl border bg-[#0E0E0E] h-16 flex items-center justify-center text-2xl font-extrabold tracking-widest overflow-hidden',
+                                  active
+                                    ? 'border-amber-400/60 shadow-[0_0_0_1px_rgba(245,158,11,0.2),0_0_20px_rgba(245,158,11,0.25)]'
+                                    : 'border-[#27272A]'
+                                )
+                              }
+                            >
+                              {active && <div className="absolute inset-0 bg-gradient-to-b from-amber-300/25 via-transparent to-amber-400/10" />}
+                              <div className="relative z-10">{active && rv.spinning ? (rv.spin ?? pp) : (i < rv.step ? pp : pp)}</div>
+                              <div className="absolute top-0 left-0 right-0 h-2 bg-gradient-to-b from-black/40 to-transparent" />
+                              <div className="absolute bottom-0 left-0 right-0 h-2 bg-gradient-to-t from-black/40 to-transparent" />
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {w && (
+                        <div className="mt-3 text-sm">
+                          <div className="font-medium">Winner: {w.name}</div>
+                          <div className="opacity-80">{maskWinnerPhone ? `09${maskPhoneLast3(w.phoneNorm)}` : w.phoneNorm} • Tier {w.tier.slice(1)}</div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Action buttons (symbol-only) */}
-            <div className="mt-6 flex items-center gap-4">
+            <div className="mt-6 flex items-center gap-4 hidden">
+              {groupMode && activeGroupPrizes.length > 0 && (
+                <button
+                  onClick={drawFlash}
+                  disabled={spinning}
+                  title="Draw group (Space)"
+                  aria-label="Draw group"
+                  className={
+                    classNames(
+                      'relative w-14 h-14 rounded-full flex items-center justify-center font-bold text-xl',
+                      'bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500',
+                      'shadow-[0_10px_25px_rgba(245,158,11,0.35)] border border-amber-300/40',
+                      spinning && 'opacity-80'
+                    )
+                  }
+                >
+                  �s��,?
+                </button>
+              )}
               {currentPrize && !currentWinner && (
                 <button
                   onClick={drawFlash}
@@ -663,7 +999,7 @@ export default function App() {
                 </button>
               )}
 
-              {currentPrize && (
+              { !groupMode && currentPrize && ( 
                 <button
                   onClick={resetRound}
                   title="Reset round (R)"
@@ -673,7 +1009,7 @@ export default function App() {
                   ↻
                 </button>
               )}
-              {currentPrize && (
+              { !groupMode && currentPrize && ( 
                 <button
                   onClick={nextPrize}
                   title="Next prize (N)"
@@ -683,7 +1019,7 @@ export default function App() {
                   ⏭️
                 </button>
               )}
-              {currentPrize && (
+              { !groupMode && currentPrize && ( 
                 <button
                   onClick={undoLastPrize}
                   title="Undo last (U)"
@@ -716,18 +1052,18 @@ export default function App() {
         </div>
 
         {/* Right pane: Participants left — independently scrollable */}
-        <div className="col-span-12 lg:col-span-4">
-          <div className="rounded-2xl p-5 bg-[#161616]/80 border border-[#27272A] h-full flex flex-col overflow-y-auto">
+        <div className="col-span-12 lg:col-span-4 min-h-0">
+          <div className="rounded-2xl p-5 bg-[#161616]/80 border border-[#27272A] h-full flex flex-col overflow-y-auto min-h-0">
             <div className="flex items-center justify-between sticky top-0 bg-[#161616]/80 backdrop-blur-sm z-10 pb-2">
               <div className="text-lg font-semibold">Participants left</div>
-              <div className="text-4xl font-extrabold">{remainingList.length}</div>
+              <div className="text-4xl font-extrabold">{(groupMode ? groupRemaining : remainingList).length}</div>
             </div>
 
             <div className="mt-2 flex-1">
-              {remainingList.length > 30 ? (
+              {(groupMode ? groupRemaining : remainingList).length > 30 ? (
                 <div className="pr-2">
                   <ul className="space-y-2 text-sm">
-                    {remainingList.slice(0, 2000).map((p) => (
+                    {(groupMode ? groupRemaining : remainingList).slice(0, 2000).map((p) => (
                       <li key={p.id} className="flex items-center justify-between border-b border-[#27272A]/50 py-1">
                         <span className="truncate mr-2">{p.name}</span>
                         <span className="opacity-80">09{maskPhoneLast3(p.phoneNorm)}</span>
@@ -737,7 +1073,7 @@ export default function App() {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 gap-2 pr-2">
-                  {remainingList.map((p) => (
+                  {(groupMode ? groupRemaining : remainingList).map((p) => (
                     <div key={p.id} className="rounded-xl border border-[#27272A] bg-[#0E0E0E] p-3">
                       <div className="font-medium truncate">{p.name}</div>
                       <div className="text-sm opacity-80">09{maskPhoneLast3(p.phoneNorm)}</div>
@@ -751,7 +1087,7 @@ export default function App() {
         </div>
 
         {/* Footer hint */}
-        <div className="col-span-12">
+        <div className="col-span-12 hidden">
           <div className="text-center text-xs opacity-70 mt-2">Hotkeys hint: Space = Draw • N = Next prize • R = Reset round</div>
         </div>
       </div>
@@ -774,6 +1110,38 @@ export default function App() {
             </div>
 
             <div className="grid grid-cols-12 gap-6">
+              {/* Group draw options */}
+              <div className="col-span-12 rounded-2xl p-5 bg-neutral-900 border border-neutral-800">
+                <div className="flex items-center gap-4">
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="accent-neutral-300"
+                      checked={groupMode}
+                      onChange={(e) => setGroupMode(e.target.checked)}
+                    />
+                    Group draw mode
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <span className="opacity-70 text-sm">Group:</span>
+                    <select
+                      className="bg-neutral-800 border border-neutral-700 rounded-md px-2 py-1 text-sm"
+                      value={selectedGroup}
+                      onChange={(e) => setSelectedGroup(e.target.value)}
+                      disabled={!groupMode || groupNames.length === 0}
+                    >
+                      {groupNames.map((g) => (
+                        <option key={g} value={g}>
+                          {g}
+                        </option>
+                      ))}
+                    </select>
+                    {groupMode && (
+                      <span className="opacity-70 text-xs">Active prizes in group: {activeGroupPrizes.length}</span>
+                    )}
+                  </div>
+                </div>
+              </div>
               {/* Participants */}
               <div className="col-span-12 xl:col-span-5 rounded-2xl p-5 bg-neutral-900 border border-neutral-800">
                 <div className="text-lg font-semibold">Participants</div>
@@ -817,7 +1185,7 @@ export default function App() {
               <div className="col-span-12 xl:col-span-7 rounded-2xl p-5 bg-neutral-900 border border-neutral-800">
                 <div className="text-lg font-semibold">Prizes</div>
                 <div className="mt-3 text-sm opacity-80">
-                  CSV headers: <code>label,eligible,group,subtitle,id</code>
+                  CSV headers: <code>id,label,group,subtitle,eligible</code>
                 </div>
                 <div className="mt-3 flex items-center gap-3">
                   <input type="file" accept=".csv" onChange={handlePrizesCSVFile} className="text-sm" />
@@ -957,13 +1325,103 @@ export default function App() {
         </div>
       )}
 
+      {/* Fixed bottom control bar */}
+      <div className="fixed bottom-0 left-0 right-0 z-40">
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/40 to-transparent" />
+        <div className="px-6 pb-4 pt-3 flex items-center justify-between gap-4 bg-[#0B0B0B]/80 backdrop-blur supports-[backdrop-filter]:bg-[#0B0B0B]/60 border-t border-[#27272A]">
+          <div className="text-xs opacity-70">Hotkeys: Space = Draw • N = Next • U = Undo • R = Reset</div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={drawFlash}
+              disabled={!groupMode ? (!!currentWinner || !currentPrize) : !activeGroupPrizes.some((pz) => !winnersByPrizeId[pz.id] && !(groupRevealByPrizeId[pz.id]?.done))}
+              title="Draw (Space)"
+              aria-label="Draw"
+              className={
+                classNames(
+                  'relative w-12 h-12 rounded-full flex items-center justify-center font-bold text-base',
+                  'bg-gradient-to-b from-amber-300 via-amber-400 to-amber-500',
+                  'shadow-[0_10px_25px_rgba(245,158,11,0.35)] border border-amber-300/40',
+                  (!groupMode && (!!currentWinner || !currentPrize)) && 'opacity-50',
+                  (groupMode && !activeGroupPrizes.some((pz) => !winnersByPrizeId[pz.id] && !(groupRevealByPrizeId[pz.id]?.done))) && 'opacity-50'
+                )
+              }
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="w-5 h-5 text-black" fill="currentColor" aria-hidden>
+                <path d="M13 2L5 13h6l-2 9 10-14h-6l2-6z"/>
+              </svg>
+            </button>
+            {/* Reset: single mode resets round; group mode resets current group */}
+            <button
+              onClick={groupMode ? resetCurrentGroup : resetRound}
+              title={groupMode ? 'Reset group (R)' : 'Reset round (R)'}
+              aria-label="Reset"
+              className={
+                classNames('w-11 h-11 rounded-full bg-[#27272A] border border-[#3a3a3f] flex items-center justify-center text-sm')
+              }
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="w-5 h-5 text-neutral-200" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <path d="M21 12a9 9 0 1 1-9-9"/>
+                <path d="M3 5v6h6"/>
+              </svg>
+            </button>
+
+            {/* Prev / Undo */}
+            {groupMode ? (
+              <button
+                onClick={prevGroup}
+                title="Prev group"
+                aria-label="Prev group"
+                className="w-11 h-11 rounded-full bg-[#27272A] border border-[#3a3a3f] flex items-center justify-center text-sm"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="w-5 h-5 text-neutral-200" fill="currentColor" aria-hidden>
+                  <path d="M19 7l-7 5 7 5V7z"/>
+                  <path d="M12 7l-7 5 7 5V7z"/>
+                </svg>
+              </button>
+            ) : (
+              <button
+                onClick={undoLastPrize}
+                disabled={prizes.length === 0}
+                title="Undo last (U)"
+                aria-label="Undo last"
+                className={
+                  classNames('w-11 h-11 rounded-full bg-[#27272A] border border-[#3a3a3f] flex items-center justify-center text-sm',
+                    prizes.length === 0 && 'opacity-50 cursor-not-allowed')
+                }
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="w-5 h-5 text-neutral-200" fill="currentColor" aria-hidden>
+                  <path d="M7 12l5-5v3h7v4h-7v3l-5-5z"/>
+                </svg>
+              </button>
+            )}
+
+            {/* Next: single -> next prize, group -> next group */}
+            <button
+              onClick={groupMode ? nextGroup : nextPrize}
+              title={groupMode ? 'Next group (N)' : 'Next prize (N)'}
+              aria-label="Next"
+              className="w-11 h-11 rounded-full bg-[#27272A] border border-[#3a3a3f] flex items-center justify-center text-sm"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="w-5 h-5 text-neutral-200" fill="currentColor" aria-hidden>
+                <path d="M5 7l7 5-7 5V7z"/>
+                <path d="M12 7l7 5-7 5V7z"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Settings button (symbol-only) */}
       <button
         aria-label="Settings"
-        className="fixed top-6 right-6 rounded-full w-9 h-9 flex items-center justify-center bg-neutral-800 border border-neutral-700 hover:bg-neutral-700"
+        className="fixed top-6 right-6 rounded-full w-9 h-9 flex items-center justify-center bg-neutral-800 border border-neutral-700 hover:bg-neutral-700 text-transparent"
         onClick={() => setSettingsOpen(true)}
         title="Open settings"
       >
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="w-[18px] h-[18px]" fill="none" stroke="#e5e7eb" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c0 .66.26 1.3.73 1.77.47.47 1.11.73 1.77.73H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
         ⚙️
       </button>
 
@@ -972,7 +1430,43 @@ export default function App() {
         <div className="fixed inset-0 z-[60] flex items-center justify-center">
           <div className="absolute inset-0 bg-black/70" />
           <div className="relative w-full max-w-4xl mx-auto bg-[#0E0E0E] border border-[#27272A] rounded-2xl p-6 text-sm shadow-2xl">
-            <div className="text-xl font-semibold mb-4">Setup — load your CSVs to begin</div>
+            <div className="text-xl font-semibold mb-4">Setup — load your CSV</div>
+            {/* Seed selection */}
+            <div className="rounded-xl bg-[#161616] border border-[#27272A] p-4 mb-4">
+              <div className="font-medium mb-2">Seed</div>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={100}
+                  value={seedText}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/[^0-9]/g, '');
+                    if (!raw) { setSeedText(''); return; }
+                    let n = parseInt(raw, 10);
+                    if (Number.isNaN(n)) { setSeedText(''); return; }
+                    n = Math.max(1, Math.min(100, n));
+                    setSeedText(String(n));
+                  }}
+                  placeholder="Enter seed (1-100)"
+                  className="flex-1 rounded-md bg-neutral-900 border border-neutral-700 px-3 py-2"
+                />
+                <button
+                  className="w-10 h-10 rounded-md bg-neutral-800 border border-neutral-700 flex items-center justify-center hover:bg-neutral-700"
+                  onClick={() => setSeedText(String(Math.floor(Math.random() * 100) + 1))}
+                  title="Pick random numeric seed"
+                  aria-label="Random seed"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v6h6M20 20v-6h-6" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M20 10a8 8 0 0 0-14.9-4M4 14a8 8 0 0 0 14.9 4" />
+                  </svg>
+                </button>
+              </div>
+              <div className="mt-2 text-xs opacity-70">Seed must be a number between 1 and 100. Draws are deterministic for a given seed.</div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="rounded-xl bg-[#161616] border border-[#27272A] p-4">
                 <div className="font-medium mb-2">Participants CSV</div>
@@ -998,7 +1492,7 @@ export default function App() {
               <div className="rounded-xl bg-[#161616] border border-[#27272A] p-4">
                 <div className="font-medium mb-2">Prizes CSV</div>
                 <div className="opacity-80 mb-3">
-                  Headers: <code>label,eligible,group,subtitle,id</code>
+                  Headers: <code>id,label,group,subtitle,eligible</code>
                 </div>
                 <div className="flex items-center gap-3">
                   <input type="file" accept=".csv" onChange={handlePrizesCSVFile} />
@@ -1063,3 +1557,12 @@ function SelfTests() {
     </div>
   );
 }
+
+
+
+
+
+
+
+
+
