@@ -296,7 +296,7 @@ export default function App() {
 
   // SETTINGS (slide-over)
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
-  const [eventTitle, setEventTitle] = useState<string>('New Year Draw 2025');
+  const [eventTitle, setEventTitle] = useState<string>('New Year Draw 2018');
   // SSR-safe seed state: placeholder on server, sync real value on mount
   const [seedText, setSeedText] = useState<string>(() => {
     if (isBrowser) {
