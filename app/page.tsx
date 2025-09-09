@@ -1033,7 +1033,7 @@ export default function App() {
           </div>
 
           {/* Winner banner */}
-          {currentWinner && (
+          {!groupMode && currentWinner && (
             <div className="relative rounded-2xl p-6 bg-[#161616]/90 border border-[#27272A] overflow-hidden">
               <Confetti show={showConfetti} />
               <div className="relative z-10 flex items-center justify-between">
