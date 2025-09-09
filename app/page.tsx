@@ -1033,7 +1033,7 @@ export default function App() {
           </div>
 
           {/* Winner banner */}
-          {currentWinner && (
+          {!groupMode && currentWinner && (
             <div className="relative rounded-2xl p-6 bg-[#161616]/90 border border-[#27272A] overflow-hidden">
               <Confetti show={showConfetti} />
               <div className="relative z-10 flex items-center justify-between">
@@ -1054,9 +1054,8 @@ export default function App() {
         {/* Right pane: Participants left — independently scrollable */}
         <div className="col-span-12 lg:col-span-4 min-h-0">
           <div className="rounded-2xl p-5 bg-[#161616]/80 border border-[#27272A] h-full flex flex-col overflow-y-auto min-h-0">
-            <div className="flex items-center justify-between sticky top-0 bg-[#161616]/80 backdrop-blur-sm z-10 pb-2">
+            <div className="flex items-center sticky top-0 bg-[#161616]/80 backdrop-blur-sm z-10 pb-2">
               <div className="text-lg font-semibold">Participants left</div>
-              <div className="text-4xl font-extrabold">{(groupMode ? groupRemaining : remainingList).length}</div>
             </div>
 
             <div className="mt-2 flex-1">
