@@ -833,7 +833,7 @@ export default function App() {
   // UI: Presenter + Settings Panel
   // ------------------------------
   return (
-    <div className="w-screen h-screen overflow-hidden bg-[#0B0B0B] text-[#F5F5F3] select-none">
+    <div className="w-screen h-screen overflow-hidden bg-[#151A45] text-[#F5F5F3] select-none">
       {/* Top bar */}
       <div className="flex items-center justify-between px-6 pt-6 pb-4">
         <div className="text-xl md:text-2xl font-semibold">{eventTitle}</div>
