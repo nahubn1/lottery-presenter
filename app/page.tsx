@@ -901,7 +901,7 @@ export default function App() {
                       key={i}
                       className={
                         classNames(
-                          'relative rounded-2xl border bg-[#0E0E0E] h-24 md:h-28 flex items-center justify-center text-3xl md:text-5xl font-extrabold tracking-widest overflow-hidden',
+                          'relative rounded-2xl border bg-[#111539] h-24 md:h-28 flex items-center justify-center text-3xl md:text-5xl font-extrabold tracking-widest overflow-hidden',
                           active
                             ? 'border-amber-400/60 shadow-[0_0_0_1px_rgba(245,158,11,0.2),0_0_30px_rgba(245,158,11,0.25)]'
                             : 'border-[#27272A]'
@@ -933,7 +933,7 @@ export default function App() {
                               key={i}
                               className={
                                 classNames(
-                                  'relative rounded-xl border bg-[#0E0E0E] h-16 flex items-center justify-center text-2xl font-extrabold tracking-widest overflow-hidden',
+                                  'relative rounded-xl border bg-[#111539] h-16 flex items-center justify-center text-2xl font-extrabold tracking-widest overflow-hidden',
                                   active
                                     ? 'border-amber-400/60 shadow-[0_0_0_1px_rgba(245,158,11,0.2),0_0_20px_rgba(245,158,11,0.25)]'
                                     : 'border-[#27272A]'
@@ -1054,8 +1054,8 @@ export default function App() {
         {/* Right pane: Participants left — independently scrollable */}
         <div className="col-span-12 lg:col-span-4 min-h-0">
           <div className="rounded-2xl p-5 bg-[#1D225A] border border-[#27272A] h-full flex flex-col overflow-y-auto min-h-0">
-            <div className="flex items-center sticky top-0 bg-[#161616]/80 backdrop-blur-sm z-10 pb-2">
-              <div className="text-lg font-semibold">Participants left</div>
+            <div className="flex items-center sticky top-0 bg-[#111539]/80 backdrop-blur-sm z-10 pb-2">
+              <div className="text-lg font-semibold opacity-40">Participants left</div>
             </div>
 
             <div className="mt-2 flex-1">
