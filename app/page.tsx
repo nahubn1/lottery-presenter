@@ -853,7 +853,7 @@ export default function App() {
 
         <div className="col-span-12 lg:col-span-8 min-h-0 flex flex-col gap-6">
           {/* Meta + Cards */}
-          <div className="rounded-2xl p-5 bg-[#161616]/80 border border-[#27272A] shadow-lg flex flex-col min-h-0">
+          <div className="rounded-2xl p-5 bg-[#1D225A] border border-[#27272A] shadow-lg flex flex-col min-h-0">
             {/* Meta row */}
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -1053,7 +1053,7 @@ export default function App() {
 
         {/* Right pane: Participants left — independently scrollable */}
         <div className="col-span-12 lg:col-span-4 min-h-0">
-          <div className="rounded-2xl p-5 bg-[#161616]/80 border border-[#27272A] h-full flex flex-col overflow-y-auto min-h-0">
+          <div className="rounded-2xl p-5 bg-[#1D225A] border border-[#27272A] h-full flex flex-col overflow-y-auto min-h-0">
             <div className="flex items-center sticky top-0 bg-[#161616]/80 backdrop-blur-sm z-10 pb-2">
               <div className="text-lg font-semibold">Participants left</div>
             </div>
