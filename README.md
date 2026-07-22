@@ -1,12 +1,11 @@
 # Lottery Presenter
 
 This project is a minimalist Next.js implementation of the lottery presenter
-interface described in your instructions. It is configured for static export
-so it can be hosted easily on platforms like Vercel. The fully featured
-presenter UI—including the setup overlay, gold flash draw button, icon-only
-controls, auto‑completion when a single candidate remains, and an
-independently scrolling list of remaining participants—is expected to be
-supplied via a `index.tsx` component from your canvas.
+interface. It is configured for static export so it can be hosted easily on 
+platforms like Vercel. The fully featured presenter UI—including the setup 
+overlay, gold flash draw button, icon-only controls, auto‑completion when 
+a single candidate remains, and an independently scrolling list of remaining 
+participants—is expected to be supplied via a `index.tsx` component from your canvas.
 
 ## CSV Formats
 
